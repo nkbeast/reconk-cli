@@ -30,6 +30,8 @@ class RunContext:
     skip: set = field(default_factory=set)
     #: module kwargs overrides (e.g. extra httpx flags)
     extra: dict = field(default_factory=dict)
+    #: occurrence counter of this phase in the plan (1 = first run)
+    round_no: int = 1
 
     def module_file(self, module: str, category: str, filename: str) -> Path:
         return self.out.cat(category) / filename
@@ -79,3 +81,19 @@ class Module:
 
     def done(self, msg: str = "") -> None:
         self.console.print(f"  [green]✔ {self.label} complete[/green]{(' — ' + msg) if msg else ''}")
+
+    def wait_for_file(self, path: Path, timeout: int = 600) -> bool:
+        """Block until `path` exists (a parallel sibling phase writes it).
+
+        Used when a phase runs in the same parallel stage as a producer
+        (e.g. tech fingerprinting waits for the live filter's alive.txt).
+        Returns True when the file appeared, False on timeout.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return True
+            time.sleep(2)
+        return False

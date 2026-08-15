@@ -43,6 +43,22 @@ def _run_pipeline(
     verbose: bool = False,
     target_name: Optional[str] = None,
 ) -> int:
+    # mixed scope: run the single workflow first, then the wildcard
+    # workflow, into <target>/single and <target>/wildcard (collapsed tree)
+    if scope.mode == "mixed":
+        singles = [d for d in scope.domains if d not in scope.wildcards]
+        wilds = scope.wildcards + scope.network_targets() + scope.orgs
+        rc = 0
+        if singles:
+            s_scope = Scope.from_input(scope.name, ",".join(singles))
+            rc |= _run_pipeline(cfg, s_scope, skip=skip, only=only, base_dir=base_dir,
+                                verbose=verbose, target_name=f"{scope.name}/single")
+        if wilds:
+            w_scope = Scope.from_input(scope.name, ",".join(wilds), force_wildcard=True)
+            rc |= _run_pipeline(cfg, w_scope, skip=skip, only=only, base_dir=base_dir,
+                                verbose=verbose, target_name=f"{scope.name}/wildcard")
+        return rc
+
     base = Path(base_dir) if base_dir else Path(cfg.output_base_dir()).expanduser()
     out = OutputTree(base, target_name or scope.name)
     out.root.mkdir(parents=True, exist_ok=True)
@@ -247,6 +263,16 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
     (root / "scope.txt").write_text("\n".join(all_entries) + "\n", encoding="utf-8")
 
     plan_files = (
+        "  WORKFLOW (stages — phases in [] run in parallel):\n"
+        "  single   : [dns + live + ports + tech + urls] -> [params + js]\n"
+        "  wildcard : [dns + passive + horizontal] -> [active] -> [vertical]\n"
+        "             -> [merge #1] -> [live #1] -> [urls]\n"
+        "             -> [merge #2] -> [live #2]\n"
+        "             -> [js + tech + params] -> [ports + takeover]\n"
+        "  network  : horizontal -> ports -> live\n"
+        "  mixed    : single workflow first (-> <target>/single), then\n"
+        "             wildcard workflow (-> <target>/wildcard)\n"
+        "\n"
         f"  dns        <- {root}/scope.txt            (scripts/dnsrecon.py -l)\n"
         f"  passive    <- {root}/scope.txt            (subfinder -dL)\n"
         f"  active     <- {root}/scope.txt            (puredns bruteforce -d)\n"

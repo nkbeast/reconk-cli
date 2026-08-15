@@ -52,6 +52,9 @@ class CommandRunner:
     def __init__(self, console: Console, log_dir: Optional[Path] = None):
         self.console = console
         self.log_dir = log_dir
+        #: set by the pipeline while a parallel stage runs — phases then
+        #: stream via plain status lines instead of overlapping Live panels
+        self.parallel_mode = False
 
     # ------------------------------------------------------------------ #
     def _log_path(self, name: str) -> Optional[Path]:
@@ -162,7 +165,7 @@ class CommandRunner:
 
         from rich.live import Live
 
-        if quiet:
+        if quiet or self.parallel_mode:
             live = None
         else:
             live = Live(
@@ -248,6 +251,11 @@ class CommandRunner:
                 live.stop()
             except Exception:  # noqa: BLE001
                 pass
+        elif not quiet and self.parallel_mode:
+            if rc == 0:
+                self.console.print(f"  [green]✔ {label}[/green] completed in {elapsed:.1f}s")
+            else:
+                self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
 
         if check and rc != 0:
             if not quiet:

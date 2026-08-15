@@ -20,6 +20,12 @@ class TechFingerprintModule(Module):
 
     def run(self) -> ModuleResult:
         alive = self.ctx.out.read("live", "alive.txt")
+        if not alive and self.ctx.round_no == 1:
+            # single scope: live filtering runs in the SAME parallel stage —
+            # wait for it to write alive.txt before fingerprinting
+            self.console.print("  [dim]· waiting for live filter output…[/dim]")
+            self.wait_for_file(self.ctx.out.cat("live") / "alive.txt", timeout=900)
+            alive = self.ctx.out.read("live", "alive.txt")
         if not alive:
             return ModuleResult(self.name, message="no alive endpoints yet")
 

@@ -1,20 +1,27 @@
 """Pipeline orchestration.
 
-Plans and executes the recon phases in dependency order, honouring the
-scope mode:
+Executes the recon phases in dependency order as *stages*. A stage is a
+group of phases: a single-phase stage runs alone, a multi-phase stage
+runs all its phases in parallel threads.
 
-  wildcard : dns -> passive -> active -> vertical -> horizontal
-             -> merge -> live -> ports -> urls -> params -> js
-             -> tech -> takeover
-  single   : dns -> live (root+www) -> ports -> urls -> params -> js
-             -> tech        (no subdomain enum, no takeover)
-  network  : horizontal -> ports -> live(ips)     (no DNS/subdomains)
-  mixed    : union of the applicable phases
+  single   : [dns + live + ports + tech + urls] -> [params + js]
+             (no subdomain enum, no takeover)
+  wildcard : [dns + passive + horizontal] -> [active]
+             -> [vertical] -> [merge #1] -> [live #1]
+             -> [urls] -> [merge #2] -> [live #2]
+             -> [js + tech + params] -> [ports + takeover]
+             (merge #2 folds the URL-harvested subdomains back into the
+             pool so the second live pass + all scans see the new hosts)
+  network  : horizontal -> ports -> live
+  mixed    : the single workflow runs first, then the wildcard workflow,
+             into <target>/single and <target>/wildcard (collapsed tree)
 """
 
 from __future__ import annotations
 
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 from rich.console import Console
@@ -22,42 +29,34 @@ from rich.panel import Panel
 from rich.table import Table
 
 from reconk.config import Config
-from reconk.modules import ModuleResult, build_modules
+from reconk.modules import ModuleResult, REGISTRY
 from reconk.output import OutputTree
 from reconk.runner import CommandRunner
 from reconk.scope import Scope
 
-#: full pipeline in dependency order
-WILDCARD_PLAN = [
-    "dns",
-    "passive",
-    "active",
-    "vertical",
-    "horizontal",
-    "merge",
-    "live",
-    "ports",
-    "urls",
-    "params",
-    "js",
-    "tech",
-    "takeover",
+#: full pipeline as ordered stages (parallel groups)
+SINGLE_STAGES = [
+    ["dns", "live", "ports", "tech", "urls"],
+    ["params", "js"],
 ]
 
-SINGLE_PLAN = [
-    "dns",
-    "live",
-    "ports",
-    "urls",
-    "params",
-    "js",
-    "tech",
+WILDCARD_STAGES = [
+    ["dns", "passive", "horizontal"],
+    ["active"],
+    ["vertical"],
+    ["merge"],
+    ["live"],
+    ["urls"],
+    ["merge"],
+    ["live"],
+    ["js", "tech", "params"],
+    ["ports", "takeover"],
 ]
 
-NETWORK_PLAN = [
-    "horizontal",
-    "ports",
-    "live",
+NETWORK_STAGES = [
+    ["horizontal"],
+    ["ports"],
+    ["live"],
 ]
 
 MODULE_LABELS = {
@@ -69,7 +68,7 @@ MODULE_LABELS = {
     "merge": "Merge subdomains (unique, in-scope, resolved)",
     "live": "Live filtering (httpx)",
     "ports": "Port scanning (naabu)",
-    "urls": "URL harvesting (native multi-source)",
+    "urls": "URL harvesting (SpiderCrawl)",
     "params": "Parameter extraction",
     "js": "JavaScript analysis (katana + endpoints + secrets)",
     "tech": "Technology fingerprinting",
@@ -78,7 +77,7 @@ MODULE_LABELS = {
 
 
 class Pipeline:
-    """Executes a module plan against a run context."""
+    """Executes a module plan against a run context, stage by stage."""
 
     def __init__(
         self,
@@ -100,60 +99,86 @@ class Pipeline:
         self.results: List[ModuleResult] = []
 
     # ------------------------------------------------------------------ #
-    def plan(self) -> List[str]:
+    def stages(self) -> List[List[str]]:
+        """Ordered stages after skip/only filtering (empty stages dropped)."""
         mode = self.scope.mode
         if mode == "single":
-            plan = list(SINGLE_PLAN)
+            raw = SINGLE_STAGES
         elif mode == "network":
-            plan = list(NETWORK_PLAN)
+            raw = NETWORK_STAGES
         else:  # wildcard / mixed
-            plan = list(WILDCARD_PLAN)
-            if self.scope.is_single or not self.scope.has_web_targets:
-                # mixed scope with no web targets: drop the domain-only phases
-                if not self.scope.has_web_targets:
-                    plan = NETWORK_PLAN
-        if self.only:
-            plan = [p for p in plan if p in self.only]
-        if self.skip:
-            plan = [p for p in plan if p not in self.skip]
-        return plan
+            raw = WILDCARD_STAGES
+            if not self.scope.has_web_targets:
+                raw = NETWORK_STAGES
+        stages: List[List[str]] = []
+        for group in raw:
+            kept = [p for p in group if p not in self.skip]
+            if self.only:
+                kept = [p for p in kept if p in self.only]
+            if kept:
+                stages.append(kept)
+        return stages
+
+    def plan(self) -> List[str]:
+        """Flat phase list (order of first appearance per stage)."""
+        flat: List[str] = []
+        for group in self.stages():
+            for p in group:
+                if p not in flat:
+                    flat.append(p)
+        return flat
 
     # ------------------------------------------------------------------ #
     def run_all(self) -> List[ModuleResult]:
-        plan = self.plan()
-        if not plan:
+        stages = self.stages()
+        if not stages:
             self.console.print("[yellow]! nothing to do — all phases skipped[/yellow]")
             return []
 
-        self.console.print(
-            Panel.fit(
-                f"[bold]Phase plan[/bold] — mode [cyan]{self.scope.mode}[/cyan]\n"
-                + "\n".join(
-                    f"  [cyan]{i + 1:>2}.[/cyan] {MODULE_LABELS.get(p, p)}"
-                    for i, p in enumerate(plan)
-                ),
-                border_style="cyan",
-            )
-        )
+        self._show_plan(stages)
 
         start = time.monotonic()
-        modules = {m.name: m for m in build_modules(self.ctx())}
-        for name in plan:
-            mod = modules.get(name)
-            if mod is None:
-                continue
-            t0 = time.monotonic()
-            try:
-                result = mod.run()
-            except Exception as e:  # noqa: BLE001
-                self.console.print(f"  [red]✗ {name} crashed: {e}[/red]")
-                result = ModuleResult(name, ok=False, message=str(e))
-            result.message += f" ({time.monotonic() - t0:.0f}s)"
-            self.results.append(result)
+        counts = Counter()  # phase name -> times run (for round labels)
+        for group in stages:
+            parallel = len(group) > 1
+            self.runner.parallel_mode = parallel
+            if parallel:
+                with ThreadPoolExecutor(max_workers=len(group), thread_name_prefix="reconk") as pool:
+                    futs = {pool.submit(self._run_phase, name, counts[name] + 1): name for name in group}
+                    for fut in futs:
+                        result = fut.result()
+                        counts[result.name] += 1
+                        self.results.append(result)
+            else:
+                name = group[0]
+                result = self._run_phase(name, counts[name] + 1)
+                counts[result.name] += 1
+                self.results.append(result)
+        self.runner.parallel_mode = False
         elapsed = time.monotonic() - start
 
-        self._summary(plan, elapsed)
+        self._summary(elapsed)
         return self.results
+
+    # ------------------------------------------------------------------ #
+    def _run_phase(self, name: str, round_no: int) -> ModuleResult:
+        ctx = self.ctx()
+        ctx.round_no = round_no
+        mod = None
+        for cls in REGISTRY:
+            if cls.name == name:
+                mod = cls(ctx)
+                break
+        if mod is None:
+            return ModuleResult(name, ok=False, message="unknown phase")
+        t0 = time.monotonic()
+        try:
+            result = mod.run()
+        except Exception as e:  # noqa: BLE001
+            self.console.print(f"  [red]✗ {name} crashed: {e}[/red]")
+            result = ModuleResult(name, ok=False, message=str(e))
+        result.message += f" ({time.monotonic() - t0:.0f}s)"
+        return result
 
     # ------------------------------------------------------------------ #
     def ctx(self):
@@ -169,17 +194,36 @@ class Pipeline:
         )
 
     # ------------------------------------------------------------------ #
-    def _summary(self, plan: List[str], elapsed: float) -> None:
+    def _show_plan(self, stages: List[List[str]]) -> None:
+        lines = [f"[bold]Phase plan[/bold] — mode [cyan]{self.scope.mode}[/cyan]"]
+        n = 0
+        for group in stages:
+            if len(group) > 1:
+                names = ", ".join(f"[cyan]{MODULE_LABELS.get(p, p)}[/cyan]" for p in group)
+                n += 1
+                lines.append(f"  [magenta]▶ {n}.[/magenta] [parallel] {names}")
+            else:
+                n += 1
+                lines.append(f"  [cyan]▶ {n}.[/cyan] {MODULE_LABELS.get(group[0], group[0])}")
+        self.console.print(Panel.fit("\n".join(lines), border_style="cyan"))
+
+    # ------------------------------------------------------------------ #
+    def _summary(self, elapsed: float) -> None:
         table = Table(title=f"Recon summary — {self.scope.name}", border_style="green")
         table.add_column("Phase", style="cyan")
         table.add_column("Result", style="bold")
+        counts: Counter = Counter()
         for result in self.results:
+            counts[result.name] += 1
+            round_no = counts[result.name]
+            label = MODULE_LABELS.get(result.name, result.name)
+            if round_no > 1:
+                label += f" (round {round_no})"
             status = "✔" if result.ok else "✗"
             color = "green" if result.ok else "red"
             files = result.files[:3]
             extra = f"  [dim]{', '.join(str(f).split('/')[-1] for f in files)}[/dim]" if files else ""
-            table.add_row(f"[{color}]{status}[/{color}] {MODULE_LABELS.get(result.name, result.name)}",
-                          result.message + extra)
+            table.add_row(f"[{color}]{status}[/{color}] {label}", result.message + extra)
         self.console.print(table)
         for result in self.results:
             if result.files:

@@ -19,7 +19,14 @@ its own text file the moment it finishes.
   No JSON anywhere.
 - 🧠 **Scope-aware workflow** — single-domain scope skips subdomain
   enumeration entirely; wildcard scope runs the full pipeline; network
-  scope (CIDR/ASN/IP) runs the horizontal + ports phases.
+  scope (CIDR/ASN/IP) runs the horizontal + ports phases; mixed scope
+  runs the single workflow first, then the wildcard workflow.
+- 🚀 **Staged parallelism** — independent phases run in the same stage
+  simultaneously (dns+passive+horizontal, js+tech+params, ports+takeover,
+  …); dependent phases run alone. The merge phase collapses every
+  subdomain source into one unique in-scope list, the URL harvest feeds
+  newly-discovered (hidden) subdomains back into the pool, and live
+  filtering runs twice so every scan sees the final list.
 - 🏃 **Fast by default** — subfinder uses its fast source set (optional
   `-all`), the native scripts are async / threaded, and heavy work is
   parallelised.
@@ -50,6 +57,51 @@ External tools (must be in `PATH`):
 ./reconk scan shop --scope shop.com --wildcard --skip ports,urls
 ./reconk resume shop --only live,tech
 ./reconk doctor
+```
+
+## Workflow — staged parallelism per scope type
+
+Phases inside `[ … ]` run **simultaneously**; every other step waits for
+its dependencies to finish.
+
+**Single domains** (no subdomain enumeration — only the exact hosts):
+
+```
+[dns + live + ports + tech + urls]  →  [params + js]
+```
+
+**Wildcard domains** (full pipeline — `vertical` only runs when the
+permutation scan is enabled):
+
+```
+[dns + passive + horizontal]  →  [active]            (puredns, alone)
+→  [vertical]                  (permutation, alone)
+→  [merge #1]                  unique in-scope subdomain pool
+→  [live #1]                   filter the merged pool
+→  [urls]                      SpiderCrawl harvest → finds hidden subdomains
+→  [merge #2]                  fold URL-harvested subdomains into the pool
+→  [live #2]                   filter the NEW merged pool
+→  [js + tech + params]        scans on the final list
+→  [ports + takeover]          scans on the final list
+```
+
+The merge phase collapses passive / active / vertical / horizontal /
+URL-harvested hosts into one unique in-scope list, and `merge #2` re-runs
+it after the URL harvest so the second live pass and every scan (js,
+ports, tech, takeover) operate on the complete final list.
+
+**Network scope** (CIDR / ASN / IP):
+
+```
+horizontal  →  ports  →  live
+```
+
+**Mixed scope** (single + wildcard + network): runs the **single workflow
+first**, then the **wildcard workflow**, into a collapsed tree:
+
+```
+<target>/single/     (single workflow, runs first)
+<target>/wildcard/   (wildcard workflow — full subdomain pipeline)
 ```
 
 ## Guided TUI flow
@@ -84,39 +136,46 @@ External tools (must be in `PATH`):
 ## Output layout
 
 ```
-~/Documents/bugbounty/reconk/<target>/
+~/Documents/bugbounty/reconk/<target>/          (single / wildcard scopes)
 ├── scope.txt                # every in-scope entry
 ├── inputs.txt               # full run spec (choices, files used)
 ├── config.txt               # active config snapshot
 ├── logs/                    # per-phase command logs
 ├── 01-dns/                  # dns.txt — records + zone transfer
 ├── 02-subdomains/           # passive.txt / active.txt / vertical.txt / horizontal.txt
-│                            # + all_subdomains.txt (merged, in-scope, unique)
+│                            # + all_subdomains.txt (unique, in-scope — final pool)
 │                            # + resolved_subdomains.txt (subset that resolves)
+│                            # + urls_harvested.txt (hosts found in URLs)
 ├── 03-live/                 # alive.txt, alive_details.txt, status_codes.txt
+│                            # + alive_round1/2.txt, alive_details_round1/2.txt (history)
 ├── 04-ports/                # naabu_ports.txt, host_port_summary.txt, prefixes.txt
-├── 05-urls/                 # all_urls.txt + harvest_input.txt + spidercrawl/ (per-domain buckets)
-├── 06-parameters/           # param_urls.txt, param_keys.txt, gf_*.txt
-├── 07-js/                   # js_files.txt, js_endpoints.txt, js_secrets.txt
+│                            # + scan_targets.txt, resolved_ips.txt
+├── 05-urls/                 # all_urls.txt + harvest_input.txt
+│                            # + spidercrawl/ (per-domain buckets: urls, parameters,
+│                            #   js, sensitive, pdfs, images, media, subdomains, reports)
+├── 06-parameters/           # param_urls.txt, param_keys.txt, top_parameters.txt, gf_*.txt
+├── 07-js/                   # js_files.txt, js_endpoints.txt, js_secrets.txt, fetched/
 ├── 08-tech/                 # tech.txt
 ├── 09-takeover/             # takeover.txt
 └── 10-reports/              # summary.txt
 ```
 
-The **merge phase** (wildcard runs only, right after horizontal) collapses
-every subdomain source — passive, active, vertical, horizontal and
-URL-harvested hosts — into one canonical `all_subdomains.txt`, drops
-out-of-scope and wildcard entries, and writes the resolvable subset to
-`resolved_subdomains.txt` (via dnsx). Everything downstream (live, ports,
-urls, js, tech, takeover) reads those two files instead of re-merging
-sources itself.
-
-For "both" scopes the runs are separated:
+Mixed scopes collapse the two workflows into a nested tree — the single
+run goes first, the wildcard run second:
 
 ```
-<target>/single/     (runs first — no subdomain enumeration)
-<target>/wildcard/   (full subdomain pipeline)
+<target>/single/     (single workflow — no subdomain enumeration)
+<target>/wildcard/   (wildcard workflow — full subdomain pipeline)
 ```
+
+The **merge phase** (wildcard runs, twice) collapses every subdomain
+source — passive, active, vertical, horizontal and URL-harvested hosts —
+into one canonical `all_subdomains.txt`, drops out-of-scope and wildcard
+entries, and writes the resolvable subset to `resolved_subdomains.txt`
+(via dnsx). Merge #2 re-runs after the URL harvest so the final pool
+includes the hidden subdomains discovered inside harvested URLs — the
+second live pass and every scan (js, ports, tech, takeover) operate on
+that complete list.
 
 ## Configuration
 

@@ -8,7 +8,8 @@ Creates a per-target directory layout:
 ├── logs/                     # per-phase command logs
 ├── 01-dns/                   # DNS records + zone transfer
 ├── 02-subdomains/            # passive / active / vertical / horizontal
-├── 03-live/                  # httpx live filtering
+│                             # + all_subdomains / resolved_subdomains (merge)
+├── 03-live/                  # alive.txt + alive_round<N>.txt (round history)
 ├── 04-ports/                 # naabu port scans
 ├── 05-urls/                  # spidercrawl (wayback + common crawl)
 ├── 06-parameters/            # param urls + keys + gf

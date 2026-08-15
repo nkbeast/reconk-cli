@@ -109,14 +109,22 @@ class LiveModule(Module):
             if status:
                 status_dist[status] += 1
 
-        if urls:
-            p1 = self.ctx.out.write(self.category, "alive.txt", urls, dedupe=True)
-            res.files.append(str(p1))
-            p2 = self.ctx.out.write(self.category, "alive_details.txt", details, dedupe=True)
-            res.files.append(str(p2))
-            p3 = self.ctx.out.write(self.category, "status_codes.txt", status_counts, dedupe=True)
-            res.files.append(str(p3))
-            res.count = len(urls)
+        # always write the canonical files (possibly empty) so parallel
+        # siblings (tech fingerprinting) can wait for their existence
+        p1 = self.ctx.out.write(self.category, "alive.txt", urls, dedupe=True)
+        res.files.append(str(p1))
+        p2 = self.ctx.out.write(self.category, "alive_details.txt", details, dedupe=True)
+        res.files.append(str(p2))
+        p3 = self.ctx.out.write(self.category, "status_codes.txt", status_counts, dedupe=True)
+        res.files.append(str(p3))
+        # history per round (live runs twice on wildcard scopes)
+        r = self.ctx.round_no
+        if urls and (r > 1 or self.ctx.scope.is_wildcard):
+            r1 = self.ctx.out.write(self.category, f"alive_round{r}.txt", urls, dedupe=True)
+            res.files.append(str(r1))
+            r2 = self.ctx.out.write(self.category, f"alive_details_round{r}.txt", details, dedupe=True)
+            res.files.append(str(r2))
+        res.count = len(urls)
 
         dist = ", ".join(f"{code}x:{n}" for code, n in sorted(status_dist.items()))
         self.done(f"{res.count} alive endpoints (any status) — {dist}")
