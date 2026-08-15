@@ -121,7 +121,13 @@ def _cmd_resume(args: argparse.Namespace, cfg: Config) -> int:
     if not scope_file.exists():
         console.print("[red]! scope.txt missing — cannot rebuild scope[/red]")
         return 2
-    scope = Scope.from_input(args.target, "", str(scope_file), force_wildcard=args.wildcard)
+    # wildcard runs persist a marker file; without it the scope would be
+    # reclassified as `single` and the wrong pipeline would run
+    force_wildcard = bool(args.wildcard)
+    wild_marker = root / "scope_wildcards.txt"
+    if wild_marker.exists() and wild_marker.read_text().strip():
+        force_wildcard = True
+    scope = Scope.from_input(args.target, "", str(scope_file), force_wildcard=force_wildcard)
     return _run_pipeline(cfg, scope, skip=args.skip, only=args.only, base_dir=str(base))
 
 
@@ -141,6 +147,21 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         table.add_row(b, f"[green]✔ {found}[/green]" if found else "[red]✗ missing[/red]")
     console.print(table)
 
+    # puredns depends on massdns — check it explicitly
+    table_md = Table(title="Tool dependencies")
+    table_md.add_column("Dependency", style="cyan")
+    table_md.add_column("Used by", style="dim")
+    table_md.add_column("Status", style="bold")
+    for b, by in (
+        ("massdns", "puredns bruteforce/resolve (hard)"),
+        ("dig", "dns phase zone transfer (soft)"),
+        ("whois", "horizontal ASN prefixes (soft, bgpview fallback)"),
+        ("fping", "horizontal host discovery (soft, tcp fallback)"),
+    ):
+        found = shutil.which(b)
+        table_md.add_row(b, by, f"[green]✔ {found}[/green]" if found else "[yellow]⚠ missing[/yellow]")
+    console.print(table_md)
+
     table2 = Table(title="Bundled native scripts")
     table2.add_column("Script", style="cyan")
     table2.add_column("Status", style="bold")
@@ -153,6 +174,17 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         table2.add_row(name, f"[green]✔ {path}[/green]" if ok else f"[red]✗ missing[/red]")
     console.print(table2)
 
+    table_py = Table(title="Python dependencies")
+    table_py.add_column("Module", style="cyan")
+    table_py.add_column("Status", style="bold")
+    for mod in ("rich", "yaml", "requests", "aiohttp", "dns", "mmh3", "questionary"):
+        try:
+            __import__(mod)
+            table_py.add_row(mod, "[green]✔ present[/green]")
+        except ImportError:
+            table_py.add_row(mod, "[red]✗ missing[/red]")
+    console.print(table_py)
+
     # wordlists + resolvers
     table3 = Table(title="Data files")
     table3.add_column("Item", style="cyan")
@@ -160,7 +192,12 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     for key in ("resolvers", "subdomain_wordlist", "permutation_wordlist", "subfinder_config"):
         path = Path(str(cfg.get(f"tools.{key}", ""))).expanduser()
         ok = path.exists()
-        table3.add_row(key, f"[green]✔ {path}[/green]" if ok else f"[red]✗ {path}[/red]")
+        table3.add_row(key, f"[green]✔ {path}[/green]" if ok else f"[yellow]⚠ {path}[/yellow]")
+    bundled = _Path(__file__).resolve().parent / "data" / "subdomains-small.txt"
+    table3.add_row(
+        "bundled wordlist",
+        f"[green]✔ {bundled}[/green]" if bundled.exists() else "[red]✗ missing[/red]",
+    )
     console.print(table3)
     return 0
 

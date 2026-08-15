@@ -48,7 +48,7 @@ class VerticalEnumModule(Module):
         res = ModuleResult(self.name)
         subdir = self.ctx.out.cat(self.category) / "vertical"
         subdir.mkdir(parents=True, exist_ok=True)
-        resolvers = self._resolvers(subdir)
+        resolvers = self.ensure_resolvers()
 
         # ---- 1. permutations ----------------------------------------------
         candidates = self._generate_permutations(base_subs)
@@ -73,7 +73,8 @@ class VerticalEnumModule(Module):
 
         # ---- 2. recursive passive -----------------------------------------
         recursive: List[str] = []
-        if self.ctx.cfg.get("tools.subfinder_config"):
+        sf_cfg = self.ctx.cfg.get("tools.subfinder_config")
+        if sf_cfg and Path(sf_cfg).expanduser().exists():
             try:
                 self.runner.require("subfinder")
                 sub_file = subdir / "recursive_input.txt"
@@ -84,7 +85,7 @@ class VerticalEnumModule(Module):
                         "subfinder",
                         "-dL", str(sub_file),
                         "-all", "-silent",
-                        "-config", str(Path(self.ctx.cfg.get("tools.subfinder_config")).expanduser()),
+                        "-config", str(Path(sf_cfg).expanduser()),
                         "-o", str(out_file),
                     ],
                     name="subfinder_recursive",
@@ -95,6 +96,8 @@ class VerticalEnumModule(Module):
                     res.files.append(str(out_file))
             except Exception as e:  # noqa: BLE001
                 self.console.print(f"  [yellow]⚠ recursive subfinder: {e}[/yellow]")
+        elif sf_cfg:
+            self.console.print(f"  [yellow]⚠ subfinder config not found: {sf_cfg} — skipping recursive scan[/yellow]")
 
         # ---- 3. merge -------------------------------------------------------
         merged = resolved + recursive
@@ -112,14 +115,6 @@ class VerticalEnumModule(Module):
         for fname in ("passive.txt", "active.txt", "horizontal.txt"):
             known.update(self.ctx.out.read(self.category, fname))
         return sorted(known)
-
-    def _resolvers(self, subdir: Path) -> Path:
-        resolvers = self.ctx.cfg.tool_path("resolvers")
-        if resolvers.exists():
-            return resolvers
-        rl = subdir / "resolvers.txt"
-        rl.write_text("8.8.8.8\n1.1.1.1\n8.8.4.4\n1.0.0.1\n")
-        return rl
 
     # ------------------------------------------------------------------ #
     def _generate_permutations(self, subs: List[str]) -> Set[str]:
@@ -157,10 +152,12 @@ class VerticalEnumModule(Module):
 
         # label<->label combinations (dev-api, api-dev, ...)
         labels = [w for w in words if len(w) <= 10][:60]
-        for a in labels:
-            for b in labels:
-                if a != b:
-                    candidates.add(f"{a}-{b}.{next(iter(roots), '')}") if False else None
+        for root in roots:
+            for a in labels:
+                for b in labels:
+                    if a != b:
+                        candidates.add(f"{a}-{b}.{root}")
+                        candidates.add(f"{b}-{a}.{root}")
 
         # cap for safety
         MAX = 200_000

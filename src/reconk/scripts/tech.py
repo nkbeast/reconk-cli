@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import mmh3
 import re
 import socket
 import sys
@@ -30,6 +29,11 @@ from typing import Dict, List, Set
 from urllib.parse import urljoin, urlparse
 
 import requests
+
+try:
+    import mmh3
+except ImportError:  # optional — favicon mmh3 hashes are skipped
+    mmh3 = None
 
 try:
     from reconk.scripts.common import read_lines, unique_preserve
@@ -153,7 +157,8 @@ def favicon_hashes(body: bytes) -> List[str]:
     out: List[str] = []
     if not body:
         return out
-    out.append(f"mmh3:{mmh3.hash(body)}")
+    if mmh3 is not None:
+        out.append(f"mmh3:{mmh3.hash(body)}")
     out.append(f"sha256:{hashlib.sha256(body).hexdigest()[:32]}")
     return out
 

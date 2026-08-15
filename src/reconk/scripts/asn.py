@@ -327,6 +327,7 @@ def main() -> int:
     cidrs: Set[str] = set()
     ips: Set[str] = set()
     domains: List[str] = []
+    orgs: List[str] = []
 
     if args.scope:
         from reconk.scripts.common import parse_scope_entries
@@ -342,6 +343,8 @@ def main() -> int:
                 domains.append(value)
             elif kind == "wildcard":
                 domains.append(value)
+            elif kind == "org":
+                orgs.append(value)
 
     if args.asn:
         asns.update(a.strip() if a.strip().upper().startswith("AS") else f"AS{a.strip()}" for a in args.asn.split(",") if a.strip())
@@ -352,9 +355,34 @@ def main() -> int:
     if args.domains:
         domains += [d.strip() for d in args.domains.split(",") if d.strip()]
     if args.org:
-        # org: resolve to ASNs via IP 2ASN-ish services is unreliable;
-        # try rdap search API
-        pass
+        orgs += [o.strip() for o in args.org.split(",") if o.strip()]
+
+    # ---- org -> ASNs (bgpview search; no key required)
+    if orgs and not asns:
+        log(f"{TAG} resolving organisation(s) to ASNs via bgpview search")
+        for org in orgs:
+            try:
+                r = requests.get(
+                    "https://api.bgpview.io/search",
+                    params={"query_term": org},
+                    timeout=15,
+                    headers={"User-Agent": "reconk-horizontal"},
+                )
+                if r.status_code == 200:
+                    found = (r.json().get("data") or {}).get("asns") or []
+                    for entry in found:
+                        asn = (entry or {}).get("asn")
+                        if asn:
+                            asns.add(f"AS{asn}")
+                            log(f"    AS{asn}  {org}")
+                    if not found:
+                        log(f"{WARN} no ASNs found for org '{org}'")
+                else:
+                    log(f"{WARN} bgpview search HTTP {r.status_code} for org '{org}'")
+            except Exception as e:  # noqa: BLE001
+                log(f"{WARN} org lookup failed for '{org}': {type(e).__name__}")
+        if not asns:
+            log(f"{WARN} no ASNs resolved from orgs — provide ASNs/CIDRs explicitly")
 
     domains = unique_preserve(domains)
     log(f"[*] horizontal recon — domains={len(domains)} asns={len(asns)} cidrs={len(cidrs)} ips={len(ips)}")

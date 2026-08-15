@@ -128,6 +128,7 @@ class CommandRunner:
 
         started = time.monotonic()
         tail: deque = deque(maxlen=TAIL_WINDOW)
+        out_lines: list = []
         line_q: "queue.Queue[Optional[str]]" = queue.Queue()
         kill_flag = threading.Event()
 
@@ -181,6 +182,17 @@ class CommandRunner:
             while True:
                 if kill_flag.is_set():
                     break
+                if timeout and time.monotonic() - started > timeout:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=10)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if live:
+                        live.update(render(f"✗ timed out after {timeout}s — killed", animated=False))
+                    if check:
+                        raise CommandError(f"{display} (timeout {timeout}s)", -9, log)
+                    return subprocess.CompletedProcess(cmd, -9, "\n".join(out_lines), "")
                 try:
                     line = line_q.get(timeout=REFRESH_SECONDS)
                 except queue.Empty:
@@ -190,6 +202,7 @@ class CommandRunner:
                 if line is None:
                     break
                 line = line.rstrip("\r\n")
+                out_lines.append(line)
                 tail.append(line)
                 if log_fh:
                     log_fh.write(line + "\n")
@@ -235,13 +248,6 @@ class CommandRunner:
         elapsed = time.monotonic() - started
         rc = proc.returncode
 
-        if timeout and elapsed > timeout and rc != 0:
-            if live:
-                live.update(render(f"✗ timed out after {timeout}s — killed", animated=False))
-            if check:
-                raise CommandError(f"{display} (timeout {timeout}s)", -9, log)
-            return subprocess.CompletedProcess(cmd, -9, "", "")
-
         if live:
             if rc == 0:
                 live.update(render(f"✔ completed in {elapsed:.1f}s", animated=False))
@@ -262,7 +268,7 @@ class CommandRunner:
                 self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
             raise CommandError(display, rc, log)
 
-        return subprocess.CompletedProcess(cmd, rc, "\n".join(tail), "")
+        return subprocess.CompletedProcess(cmd, rc, "\n".join(out_lines), "")
 
     # ------------------------------------------------------------------ #
     def run_pipe(

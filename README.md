@@ -89,10 +89,15 @@ External tools (auto-installed by `install.sh`):
 |------------|-----------------------------------|
 | subfinder  | passive subdomain enumeration     |
 | puredns    | active brute-force + resolution   |
+| massdns    | puredns' resolver engine (hard dep) |
 | httpx      | live host filtering               |
 | naabu      | port scanning                     |
 | katana     | JS crawling                       |
 | anew, gf   | dedupe + param triage             |
+
+Soft dependencies (`dig`, `whois`, `fping`) are installed best-effort — every
+phase has a fallback when they are missing (TCP-connect discovery, bgpview
+API, etc.). `reconk doctor` shows exactly what is missing and why.
 
 ## 🚀 Quick start
 

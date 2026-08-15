@@ -27,7 +27,7 @@ DEFAULTS: Dict[str, Any] = {
         "base_dir": "~/Documents/bugbounty/reconk",
     },
     "tools": {
-        "resolvers": "/home/nk/Documents/bugbounty/reconkv3/src/resolvers.txt",
+        "resolvers": "~/.config/reconk/resolvers.txt",
         "subdomain_wordlist": "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
         "permutation_wordlist": "/usr/share/seclists/Discovery/DNS/deepmagic.com-prefixes-top500.txt",
         "subfinder_config": "~/.config/subfinder/provider-config.yaml",

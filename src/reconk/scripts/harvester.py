@@ -273,7 +273,9 @@ async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaph
                         "Accept-Encoding": "gzip, deflate",
                         "Accept": "text/plain",
                     },
-                    timeout=aiohttp.ClientTimeout(total=None, connect=15),
+                    # total=None: CDX streams can be huge — but a stalled
+                    # connection must not hang the stage forever
+                    timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
                     ssl=False,
                 ) as resp:
                     if resp.status == 200:
@@ -333,7 +335,7 @@ async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Se
             async with session.get(
                 q,
                 headers={"User-Agent": ua, "Accept-Encoding": "gzip"},
-                timeout=aiohttp.ClientTimeout(total=None, connect=10),
+                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=60),
                 ssl=False,
             ) as resp:
                 if resp.status != 200:

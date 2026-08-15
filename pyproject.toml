@@ -34,4 +34,4 @@ packages = [
 include-package-data = true
 
 [tool.setuptools.package-data]
-reconk = ["../config/*.yaml"]
+reconk = ["data/*.txt", "../config/*.yaml"]

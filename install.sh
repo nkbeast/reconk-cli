@@ -117,14 +117,18 @@ fi
 echo
 say "External recon tools (installing missing ones)..."
 
+# helper: apt install (best effort, no die — go install covers the rest)
+apt_try() {
+    [[ -n "${SUDO}" || "$(id -u)" -eq 0 ]] || return 1
+    "${SUDO}" apt-get install -y -q "$@" >/dev/null 2>&1
+}
+
 install_tool() {
     local tool="$1" pkg="$2"
     echo "    → ${tool} missing, installing..."
     # 1) distro repo (kali/apt)
     if [[ "${APT_TOOLS}" == *" ${tool} "* || "${APT_TOOLS}" == "${tool}"* ]] \
-        && { [[ -n "${SUDO}" || "$(id -u)" -eq 0 ]]; } \
-        && "${SUDO}" apt-get install -y -q "${tool}" >/dev/null 2>&1 \
-        && command -v "${tool}" >/dev/null 2>&1; then
+        && apt_try "${tool}" && command -v "${tool}" >/dev/null 2>&1; then
         return 0
     fi
     # 2) go install
@@ -154,6 +158,54 @@ for entry in "${GO_INSTALL[@]}"; do
         fail "${tool}" "could not be installed"
         die "missing tool: ${tool}
     go install ${pkg}   (or: ${SUDO} apt-get install -y ${tool})"
+    fi
+done
+
+# puredns depends on the massdns binary — required for bruteforce/resolve
+echo
+say "massdns (puredns dependency)..."
+if command -v massdns >/dev/null 2>&1; then
+    ok "massdns" "$(command -v massdns)"
+else
+    echo "    → massdns missing, installing..."
+    if apt_try massdns && command -v massdns >/dev/null 2>&1; then
+        ok "massdns" "installed via apt"
+    elif command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
+        TMP_MD="$(mktemp -d)"
+        if git clone -q --depth 1 https://github.com/blechschmidt/massdns "${TMP_MD}/massdns" \
+            && make -s -C "${TMP_MD}/massdns" >/dev/null 2>&1; then
+            mkdir -p "${BIN_DIR}"
+            cp "${TMP_MD}/massdns/bin/massdns" "${BIN_DIR}/massdns"
+            ok "massdns" "built from source → ${BIN_DIR}/massdns"
+        else
+            fail "massdns" "could not be installed"
+            echo "    build it manually:"
+            echo "      git clone https://github.com/blechschmidt/massdns && cd massdns && make"
+            echo "      cp bin/massdns ~/bin/massdns   (or sudo apt install massdns)"
+        fi
+        rm -rf "${TMP_MD}"
+    else
+        fail "massdns" "could not be installed (no apt/gcc)"
+        echo "    run: ${SUDO} apt-get install -y massdns   (or build from source)"
+    fi
+fi
+
+# soft dependencies (best effort — reconk has fallbacks for all of them)
+for tool in dig whois fping; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        case "${tool}" in
+            dig)   pkg="dnsutils" ;;
+            whois) pkg="whois" ;;
+            fping) pkg="fping" ;;
+        esac
+        echo "    → ${tool} missing, trying apt: ${pkg} ..."
+        if apt_try "${pkg}" && command -v "${tool}" >/dev/null 2>&1; then
+            ok "${tool}" "installed via apt"
+        else
+            fail "${tool}" "missing (optional — reconk falls back to other methods)"
+        fi
+    else
+        ok "${tool}" "$(command -v "${tool}")"
     fi
 done
 
@@ -210,6 +262,11 @@ for entry in "${GO_INSTALL[@]}"; do
         printf "    %-14s ✔ %s\n" "${tool}" "${BIN_DIR}/${tool}"
     fi
 done
+if command -v massdns >/dev/null 2>&1; then
+    printf "    %-14s ✔ %s\n" "massdns" "$(command -v massdns)"
+else
+    printf "    %-14s ⚠ %s\n" "massdns" "missing — install it, then re-run reconk doctor"
+fi
 echo
 echo "  Run:  reconk"
 echo "  Verify:  reconk doctor"

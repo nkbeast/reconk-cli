@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import shutil
 import string
 import subprocess
 import sys
@@ -65,6 +66,10 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- #
 def zone_transfer(domain: str, nameservers: List[str], out_path: str) -> List[str]:
     """Try AXFR against every NS via dig. Returns zone record lines."""
+    if not shutil.which("dig"):
+        log(f"  {WARN} dig not found in PATH — skipping zone transfer checks")
+        append_line(out_path, f"ZONETRANSFER|{domain}|SKIPPED|dig missing")
+        return []
     log(f"  {TAG} zone transfer check on {domain} — {len(nameservers)} NS")
     zone_lines: List[str] = []
     vulnerable = False

@@ -46,23 +46,8 @@ class ActiveEnumModule(Module):
         subdir = self.ctx.out.cat(self.category) / "active"
         subdir.mkdir(parents=True, exist_ok=True)
 
-        # wordlist selection
-        size = self.ctx.cfg.get("scan.brute_size", "small")
-        wl_name = self.WORDLISTS.get(size, self.WORDLISTS["small"])
-        seclists = Path("/usr/share/seclists/Discovery/DNS")
-        wordlist = seclists / wl_name
-        if not wordlist.exists():
-            wordlist = self.ctx.cfg.tool_path("subdomain_wordlist")
-        if not wordlist.exists():
-            self.console.print(f"  [yellow]⚠ wordlist not found: {wordlist} — using bundled 5k[/yellow]")
-            wordlist = self._bundled_wordlist(subdir)
-
-        resolvers = self.ctx.cfg.tool_path("resolvers")
-        if not resolvers.exists():
-            self.console.print(f"  [yellow]⚠ resolvers not found: {resolvers} — using 8.8.8.8[/yellow]")
-            rl = subdir / "resolvers.txt"
-            rl.write_text("8.8.8.8\n1.1.1.1\n8.8.4.4\n1.0.0.1\n")
-            resolvers = rl
+        wordlist = self._wordlist()
+        resolvers = self.ensure_resolvers()
 
         out_path = subdir / "bruteforce.txt"
         try:
@@ -96,8 +81,27 @@ class ActiveEnumModule(Module):
         return res
 
     # ------------------------------------------------------------------ #
-    def _bundled_wordlist(self, subdir: Path) -> Path:
-        """Fallback: minimal builtin wordlist when seclists is unavailable."""
-        fallback = subdir / "small_wordlist.txt"
-        fallback.write_text("www\napi\napp\nmail\nportal\nadmin\nstage\ndev\ntest\nvpn\n")
-        return fallback
+    def _wordlist(self) -> Path:
+        """Pick a brute-force wordlist: configured -> seclists -> bundled.
+
+        The bundled package wordlist always exists, so this phase can never
+        fail with a missing-file error.
+        """
+        size = self.ctx.cfg.get("scan.brute_size", "small")
+        wl_name = self.WORDLISTS.get(size, self.WORDLISTS["small"])
+
+        configured = self.ctx.cfg.tool_path("subdomain_wordlist")
+        if configured.exists():
+            self.console.print(f"  [dim]· wordlist: {configured}[/dim]")
+            return configured
+
+        seclists = Path("/usr/share/seclists/Discovery/DNS") / wl_name
+        if seclists.exists():
+            self.console.print(f"  [dim]· wordlist: {seclists}[/dim]")
+            return seclists
+
+        bundled = self.data_file("subdomains-small.txt")
+        self.console.print(
+            f"  [yellow]⚠ wordlist not found (configured/seclists) — using bundled {bundled.name}[/yellow]"
+        )
+        return bundled

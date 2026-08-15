@@ -16,6 +16,9 @@ from reconk.scope import Scope
 if TYPE_CHECKING:
     from reconk.modules.registry import ModuleResult
 
+#: fallback public resolvers used when the configured resolver file is missing
+BUILTIN_RESOLVERS = ["8.8.8.8", "1.1.1.1", "8.8.4.4", "1.0.0.1"]
+
 
 @dataclass
 class RunContext:
@@ -75,6 +78,33 @@ class Module:
     def script(self, name: str) -> Path:
         """Absolute path of one of the bundled native scripts."""
         return Path(__file__).resolve().parent.parent / "scripts" / name
+
+    def data_file(self, name: str) -> Path:
+        """Absolute path of a bundled data file (always exists in the package)."""
+        return Path(__file__).resolve().parent.parent / "data" / name
+
+    def ensure_resolvers(self) -> Path:
+        """Return a usable resolver list, healing a missing configured file.
+
+        When ``tools.resolvers`` does not exist, a small builtin list is
+        written there once so every later run reuses it.
+        """
+        target = self.ctx.cfg.tool_path("resolvers")
+        if target.exists():
+            return target
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("\n".join(BUILTIN_RESOLVERS) + "\n", encoding="utf-8")
+            self.console.print(
+                f"  [yellow]⚠ resolvers not found — wrote builtin list to {target}[/yellow]"
+            )
+            return target
+        except OSError:
+            pass
+        fallback = self.ctx.out.root / "logs" / "resolvers.txt"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        fallback.write_text("\n".join(BUILTIN_RESOLVERS) + "\n", encoding="utf-8")
+        return fallback
 
     def start(self, msg: str) -> None:
         self.console.print(f"\n[bold yellow]▶ {msg}[/bold yellow]")

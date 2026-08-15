@@ -32,7 +32,13 @@ class LiveModule(Module):
     def run(self) -> ModuleResult:
         hosts = self._hosts_to_probe()
         if not hosts:
-            return ModuleResult(self.name, message="nothing to probe")
+            # write the canonical files (empty) so parallel siblings
+            # (tech fingerprinting) don't block on wait_for_file
+            res = ModuleResult(self.name, message="nothing to probe")
+            res.files.append(str(self.ctx.out.write(self.category, "alive.txt", [], dedupe=True)))
+            res.files.append(str(self.ctx.out.write(self.category, "alive_details.txt", [], dedupe=True)))
+            res.files.append(str(self.ctx.out.write(self.category, "status_codes.txt", [], dedupe=True)))
+            return res
 
         self.start(f"Live filtering — {len(hosts)} host(s)")
         res = ModuleResult(self.name)
@@ -43,6 +49,11 @@ class LiveModule(Module):
             self.console.print(f"  [yellow]⚠ {e}[/yellow]")
             res.ok = False
             res.message = str(e)
+            # still write the canonical files (empty) so parallel siblings
+            # (tech fingerprinting) don't block on wait_for_file
+            res.files.append(str(self.ctx.out.write(self.category, "alive.txt", [], dedupe=True)))
+            res.files.append(str(self.ctx.out.write(self.category, "alive_details.txt", [], dedupe=True)))
+            res.files.append(str(self.ctx.out.write(self.category, "status_codes.txt", [], dedupe=True)))
             return res
 
         hosts_file = self.ctx.out.root / "probe_hosts.txt"

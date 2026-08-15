@@ -90,7 +90,9 @@ class PortScanModule(Module):
         targets.update(self.ctx.scope.cidrs)
         targets.update(self.ctx.scope.ips)
 
-        # scope_cidrs harvested by asn_recon (horizontal phase)
+        # CIDR prefixes harvested by asn_recon (horizontal phase)
+        targets.update(self.ctx.out.read(self.category, "prefixes.txt"))
+        # legacy name used by older runs
         targets.update(self.ctx.out.read(self.category, "scope_cidrs.txt"))
 
         # subdomain IPs: use the merge phase's canonical lists when present

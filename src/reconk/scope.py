@@ -245,4 +245,12 @@ class Scope:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = list(self.domains) + list(self.wildcards) + list(self.cidrs) + list(self.asns) + list(self.ips) + list(self.orgs)
         path.write_text("\n".join(sorted(set(lines))) + "\n")
+        # persist wildcard markers separately — scope.txt itself stays clean
+        # (no `*.` prefixes) because the recon tools consume it directly
+        wild_bases = set(self.wildcards)
+        if self.force_wildcard:
+            wild_bases.update(self.domains)
+        if wild_bases:
+            wc = path.parent / "scope_wildcards.txt"
+            wc.write_text("\n".join(f"*.{w}" for w in sorted(wild_bases)) + "\n")
         return path
