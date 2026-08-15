@@ -1,13 +1,44 @@
-# Reconk CLI
+<p align="center">
+  <img src="assets/reconk-banner2.png" alt="Reconk — Bug Bounty Reconnaissance Orchestrator" width="300">
+</p>
 
-**Recon isn't a phase. It's an obsession.**
+<h1 align="center">Reconk — Bug Bounty Reconnaissance Orchestrator</h1>
 
-Reconk is an end-to-end bug bounty reconnaissance orchestrator with an
-interactive TUI. It drives battle-tested external binaries (subfinder,
-puredns, httpx, naabu, katana) plus its own fast native Python scripts for
-everything else — DNS, ASN expansion, URL harvesting, tech fingerprinting
-and takeover checks. Every phase streams live into your terminal and saves
-its own text file the moment it finishes.
+<p align="center">
+  <em>Recon isn't a phase. It's an obsession.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/nkbeast/reconk-cli/releases"><img alt="Release" src="https://img.shields.io/github/v/release/nkbeast/reconk-cli?color=blue&label=release"></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <a href="https://github.com/nkbeast/reconk-cli"><img alt="Platform" src="https://img.shields.io/badge/platform-linux-lightgrey"></a>
+</p>
+
+<p align="center">
+  End-to-end <strong>bug bounty reconnaissance</strong> and <strong>attack surface discovery</strong> —
+  subdomain enumeration, DNS enumeration, live host filtering, port scanning,
+  URL harvesting, parameter mining, JS analysis, tech fingerprinting and
+  subdomain takeover detection — all in one <strong>interactive TUI</strong>.
+</p>
+
+---
+
+## 🎯 What is Reconk?
+
+Reconk is a **bug bounty reconnaissance orchestrator** that drives
+battle-tested external binaries (subfinder, puredns, httpx, naabu, katana)
+plus fast native Python scripts for DNS, ASN expansion, URL harvesting,
+tech fingerprinting and takeover checks. Every phase streams live into your
+terminal and saves its own text file the moment it finishes — no JSON, no
+databases, no lock-in. Built for **penetration testers, bug bounty hunters
+and red teams** who want a clean, scope-aware recon pipeline.
+
+**Keywords:** bug bounty, reconnaissance, recon tool, subdomain enumeration,
+attack surface discovery, DNS enumeration, OSINT, penetration testing,
+subdomain takeover, URL harvesting, tech fingerprinting, port scanning.
+
+## ✨ Features
 
 - 🎛️ **Guided interactive setup** — target name → scope type (single /
   wildcard / both) → inputs → permutation scan? → run. Single domains run
@@ -16,7 +47,6 @@ its own text file the moment it finishes.
   subfinder, puredns, httpx and the native scripts working in real time.
 - 📁 **Separate outputs, saved one by one** — each script writes its own
   `txt` output into a numbered category directory as soon as it completes.
-  No JSON anywhere.
 - 🧠 **Scope-aware workflow** — single-domain scope skips subdomain
   enumeration entirely; wildcard scope runs the full pipeline; network
   scope (CIDR/ASN/IP) runs the horizontal + ports phases; mixed scope
@@ -31,15 +61,27 @@ its own text file the moment it finishes.
   `-all`), the native scripts are async / threaded, and heavy work is
   parallelised.
 
-## Install
+## 📦 Install
 
 ```bash
-./install.sh                 # python deps + ~/bin/reconk
+git clone https://github.com/nkbeast/reconk-cli.git
+cd reconk-cli
+./install.sh                 # checks OS + deps, auto-installs missing tools, links ~/bin/reconk
 # or
 ./install.sh --dev           # + editable install into .venv
 ```
 
-External tools (must be in `PATH`):
+The installer verifies every prerequisite **before granting recon access**:
+python3 ≥ 3.9, git, curl, go, python dependencies, and the recon toolchain.
+Missing tools are installed automatically (apt first, then `go install`);
+anything it cannot install prints the exact command and exits — install it
+manually and re-run.
+
+> 💡 Prefer a single download? Grab the latest `reconk-1.0.zip` from the
+> [Releases](https://github.com/nkbeast/reconk-cli/releases) page — full
+> source, launcher and installer in one archive.
+
+External tools (auto-installed by `install.sh`):
 
 | Tool       | Used for                          |
 |------------|-----------------------------------|
@@ -50,16 +92,16 @@ External tools (must be in `PATH`):
 | katana     | JS crawling                       |
 | anew, gf   | dedupe + param triage             |
 
-## Quick start
+## 🚀 Quick start
 
 ```bash
 ./reconk                     # interactive TUI menu
 ./reconk scan shop --scope shop.com --wildcard --skip ports,urls
 ./reconk resume shop --only live,tech
-./reconk doctor
+./reconk doctor              # verify every tool before the run
 ```
 
-## Workflow — staged parallelism per scope type
+## 🔄 Workflow — staged parallelism per scope type
 
 Phases inside `[ … ]` run **simultaneously**; every other step waits for
 its dependencies to finish.
@@ -104,7 +146,7 @@ first**, then the **wildcard workflow**, into a collapsed tree:
 <target>/wildcard/   (wildcard workflow — full subdomain pipeline)
 ```
 
-## Guided TUI flow
+## 🖥️ Guided TUI flow
 
 1. **Target name** — output directory name.
 2. **Scope type**
@@ -121,7 +163,7 @@ first**, then the **wildcard workflow**, into a collapsed tree:
    `config.txt` (active config snapshot). Then phases stream live and save
    their outputs as they complete.
 
-## Native scripts
+## 🧩 Native scripts
 
 `src/reconk/scripts/` — self-contained, text-only, usable standalone:
 
@@ -133,7 +175,7 @@ first**, then the **wildcard workflow**, into a collapsed tree:
 | `tech.py`         | tech_fingerprint               | header / cookie / title / generator / body / favicon-hash fingerprinting |
 | `takeover.py`     | dnsx CNAME check               | CNAME chain + dead-target detection across 45+ cloud providers |
 
-## Output layout
+## 📁 Output layout
 
 ```
 ~/Documents/bugbounty/reconk/<target>/          (single / wildcard scopes)
@@ -177,7 +219,7 @@ includes the hidden subdomains discovered inside harvested URLs — the
 second live pass and every scan (js, ports, tech, takeover) operate on
 that complete list.
 
-## Configuration
+## ⚙️ Configuration
 
 `config/config.yaml` (overridable in `~/.config/reconk/config.yaml`):
 
@@ -201,6 +243,11 @@ scan:
   subfinder_all: "false"     # true = query ALL sources (slow)
 ```
 
-## License
+## 🤝 Contributing
 
-MIT
+Found a bug or have an idea? Open an [issue](https://github.com/nkbeast/reconk-cli/issues)
+or send a pull request.
+
+## 📜 License
+
+MIT — see [LICENSE](LICENSE).
