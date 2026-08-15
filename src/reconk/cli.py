@@ -115,7 +115,7 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
 
     binaries = [
         "subfinder", "puredns", "dnsx", "httpx", "naabu",
-        "katana", "waybackurls", "gau", "anew", "gf",
+        "katana", "anew", "gf",
     ]
     table = Table(title="Binaries")
     table.add_column("Tool", style="cyan")
@@ -256,7 +256,7 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
         f"                -> all_subdomains.txt + resolved_subdomains.txt\n"
         f"  live       <- {root}/probe_hosts.txt      (httpx -l, all_subdomains)\n"
         f"  ports      <- {root}/04-ports/scan_targets.txt  (naabu -list, resolved IPs)\n"
-        f"  urls       <- {root}/harvest_input.txt    (scripts/harvester.py -dL, roots+subs)\n"
+        f"  urls       <- {root}/harvest_input.txt    (scripts/harvester.py -l, roots+subs)\n"
         f"  js         <- {root}/katana_input.txt     (katana -list, alive)\n"
         f"  tech       <- {root}/tech_input.txt       (scripts/tech.py -l, alive)\n"
         f"  takeover   <- {root}/takeover_hosts.txt   (scripts/takeover.py -l, all_subdomains)\n"

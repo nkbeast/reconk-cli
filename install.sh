@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/bin"
 
-echo "==> Reconk CLI installer (v4.0.0)"
+echo "==> Reconk CLI installer (v1.0)"
 
 # ---------------------------------------------------------------------------
 # 1. python deps
@@ -51,7 +51,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "==> External tools:"
-for tool in subfinder puredns dnsx httpx naabu katana waybackurls gau anew gf; do
+for tool in subfinder puredns dnsx httpx naabu katana anew gf; do
     if command -v "${tool}" >/dev/null 2>&1; then
         printf "    %-14s ✔\n" "${tool}"
     else

@@ -41,7 +41,6 @@ External tools (must be in `PATH`):
 | httpx      | live host filtering               |
 | naabu      | port scanning                     |
 | katana     | JS crawling                       |
-| waybackurls, gau | extra URL sources           |
 | anew, gf   | dedupe + param triage             |
 
 ## Quick start
@@ -78,7 +77,7 @@ External tools (must be in `PATH`):
 |-------------------|--------------------------------|--------------|
 | `dnsrecon.py`     | dnsrecon_ultra + zonesniper    | full DNS record suite (A/AAAA/CNAME/NS/MX/TXT/SPF/DMARC/DKIM/CAA/DNSSEC), wildcard detection, **zone transfer (AXFR)** check against every NS |
 | `asn.py`          | asn_recon                      | domain→ASN (RDAP), ASN→prefixes (radb/bgpview), host discovery (fping/TCP), PTR + CT logs + TLS SAN hostname harvesting |
-| `harvester.py`    | spidercrawl + waybackurls + gau | async multi-source URL harvest: wayback CDX, commoncrawl, OTX, crtsh, rapiddns, hackertarget, optional urlscan/virustotal/github |
+| `harvester.py`    | spidercrawl (optimized variant)   | speed-optimized async URL harvest: wayback CDX (streamed, huge) + common crawl (2 latest indexes); per-domain buckets: all URLs, parameters, js, sensitive files, subdomains |
 | `tech.py`         | tech_fingerprint               | header / cookie / title / generator / body / favicon-hash fingerprinting |
 | `takeover.py`     | dnsx CNAME check               | CNAME chain + dead-target detection across 45+ cloud providers |
 
@@ -96,7 +95,7 @@ External tools (must be in `PATH`):
 │                            # + resolved_subdomains.txt (subset that resolves)
 ├── 03-live/                 # alive.txt, alive_details.txt, status_codes.txt
 ├── 04-ports/                # naabu_ports.txt, host_port_summary.txt, prefixes.txt
-├── 05-urls/                 # all_urls.txt + sources/<source>.txt + harvest_input.txt
+├── 05-urls/                 # all_urls.txt + harvest_input.txt + spidercrawl/ (per-domain buckets)
 ├── 06-parameters/           # param_urls.txt, param_keys.txt, gf_*.txt
 ├── 07-js/                   # js_files.txt, js_endpoints.txt, js_secrets.txt
 ├── 08-tech/                 # tech.txt

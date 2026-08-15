@@ -1,13 +1,20 @@
-"""URL harvesting via the bundled native async harvester.
+"""URL harvesting via the bundled SpiderCrawl v4 harvester.
 
-``scripts/harvester.py`` replaces spidercrawl + waybackurls + gau with one
-async multi-source harvester:
+``scripts/harvester.py`` is an exact port of the standalone SpiderCrawl
+tool (async, speed-optimized URL harvester):
 
-  * wayback CDX, commoncrawl, alienvault OTX, crtsh, rapiddns, hackertarget
-  * optional: urlscan.io / virustotal (API keys from config)
-  * GitHub code dorking (optional token)
+  * wayback machine CDX   (streamed, huge, rate-limit resilient)
+  * common crawl          (2 most recent indexes, fast fail)
 
-Output: 05-urls/all_urls.txt (+ per-source files under 05-urls/sources/)
+It runs against every unique in-scope host (roots + merged subdomains),
+staging per-domain buckets, which this module assembles into the reconk
+layout:
+
+  * 05-urls/all_urls.txt            — every unique in-scope URL
+  * 05-urls/parameters/<d>.txt      — URLs with parameters (per domain)
+  * 05-urls/js/<d>.txt              — JS URLs (per domain)
+  * 05-urls/sensitive/<d>.txt       — sensitive file URLs (per domain)
+  * 02-subdomains/urls_harvested.txt — hostnames observed in URLs
 """
 
 from __future__ import annotations
@@ -32,37 +39,23 @@ class UrlHarvestModule(Module):
         self.start(f"URL harvesting — {len(domains)} domain(s)")
         res = ModuleResult(self.name)
 
-        out_path = self.ctx.out.cat(self.category) / "all_urls.txt"
-        sources_dir = self.ctx.out.cat(self.category) / "sources"
-        subs_out = self.ctx.out.cat("subdomains") / "urls_harvested.txt"
-
         # harvest from EVERY unique in-scope subdomain, not just the roots
         input_path = self.ctx.out.cat(self.category) / "harvest_input.txt"
         input_path.write_text("\n".join(sorted(domains)) + "\n", encoding="utf-8")
 
+        # SpiderCrawl stages per-domain buckets under its -o dir
+        staging = self.ctx.out.cat(self.category) / "spidercrawl"
         args = [
-            "-dL", str(input_path),
-            "-o", str(out_path),
-            "--per-source", str(sources_dir),
-            "--subs", str(subs_out),
+            "-l", str(input_path),
+            "-o", str(staging),
         ]
-        keys = {
-            "urlscan": self.ctx.cfg.get("api_keys.urlscan", ""),
-            "virustotal": self.ctx.cfg.get("api_keys.virustotal", ""),
-            "github": self.ctx.cfg.get("api_keys.github_token", ""),
-        }
-        if keys["urlscan"]:
-            args += ["--urlscan-key", str(keys["urlscan"])]
-        if keys["virustotal"]:
-            args += ["--virustotal-key", str(keys["virustotal"])]
-        if keys["github"]:
-            args += ["--github-token", str(keys["github"])]
 
         try:
             self.runner.run_python(
                 self.script("harvester.py"),
                 args,
-                name="harvester",
+                name="spidercrawl",
+                title="SpiderCrawl URL harvesting",
                 timeout=7200,
             )
         except Exception as e:  # noqa: BLE001
@@ -70,21 +63,27 @@ class UrlHarvestModule(Module):
             res.ok = False
             res.message = str(e)
 
-        merged = self.ctx.out.read(self.category, "all_urls.txt")
-        path = self.ctx.out.write(self.category, "all_urls.txt", merged, dedupe=True)
-        res.files.append(str(path))
-        res.count = len(merged)
+        # assemble the canonical outputs from the per-domain buckets
+        merged = self._merge_bucket(staging / "urls")
+        if merged:
+            path = self.ctx.out.write(self.category, "all_urls.txt", merged, dedupe=True)
+            res.files.append(str(path))
+            res.count = len(merged)
+
+        url_subs = self._merge_bucket(staging / "subdomains")
+        if url_subs:
+            subs_path = self.ctx.out.write("subdomains", "urls_harvested.txt", url_subs, dedupe=True)
+            res.files.append(str(subs_path))
 
         # merge subdomains harvested from URLs into the canonical pool so
         # the later phases (js, tech, takeover) also see them
-        url_subs = self.ctx.out.read("subdomains", "urls_harvested.txt")
         if url_subs:
             self.ctx.out.append("subdomains", "passive.txt", url_subs)
             current = set(self.ctx.out.read("subdomains", "all_subdomains.txt"))
             current.update(url_subs)
             self.ctx.out.write("subdomains", "all_subdomains.txt", sorted(current), dedupe=True)
 
-        self.done(f"{res.count} unique URLs")
+        self.done(f"{res.count} unique URLs — {len(url_subs)} hosts from URLs")
         return res
 
     # ------------------------------------------------------------------ #
@@ -96,3 +95,19 @@ class UrlHarvestModule(Module):
         domains = set(self.ctx.scope.all_domains())
         domains.update(self.ctx.out.read("subdomains", "all_subdomains.txt"))
         return sorted(domains)
+
+    # ------------------------------------------------------------------ #
+    def _merge_bucket(self, bucket_dir) -> List[str]:
+        """Concatenate every per-domain file in a SpiderCrawl bucket dir."""
+        from pathlib import Path
+
+        bucket = Path(bucket_dir)
+        if not bucket.is_dir():
+            return []
+        merged: List[str] = []
+        for f in sorted(bucket.iterdir()):
+            if f.is_file() and f.suffix == ".txt":
+                merged += [
+                    l.strip() for l in f.read_text(errors="replace").splitlines() if l.strip()
+                ]
+        return sorted(set(merged))

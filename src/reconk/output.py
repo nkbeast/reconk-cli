@@ -10,7 +10,7 @@ Creates a per-target directory layout:
 ├── 02-subdomains/            # passive / active / vertical / horizontal
 ├── 03-live/                  # httpx live filtering
 ├── 04-ports/                 # naabu port scans
-├── 05-urls/                  # spidercrawl + wayback + gau
+├── 05-urls/                  # spidercrawl (wayback + common crawl)
 ├── 06-parameters/            # param urls + keys + gf
 ├── 07-js/                    # katana js + endpoints + secrets
 ├── 08-tech/                  # technology fingerprint

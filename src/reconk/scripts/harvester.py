@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
-"""reconk harvester — async multi-source URL harvesting.
-
-One script replaces spidercrawl + waybackurls + gau:
-
-  * wayback machine CDX   (streamed, huge)
-  * common crawl          (latest 3 indexes, parallel)
-  * alienvault OTX        (paginated)
-  * crt.sh                (hosts for the root domains)
-  * rapiddns              (hosts)
-  * hackertarget          (hosts)
-  * urlscan.io            (paginated, optional key)
-  * virustotal            (urls + subdomains, optional key)
-  * github code dorking   (optional token)
-
-Output: all URLs in one text file, per-source files, plus any
-subdomains discovered along the way.
-
-Usage:
-  python harvester.py -d example.com -o urls.txt [--subs subs.txt] [--per-source dir]
-  python harvester.py -dL domains.txt -o urls.txt
 """
+SpiderCrawl v4 — by nk
+Async, multi-source URL harvester. Crawls everything.
 
-from __future__ import annotations
+This is the speed-optimized variant (wayback CDX + common crawl only),
+ported into reconk as its URL harvesting engine.
+"""
 
 import argparse
 import asyncio
@@ -31,279 +15,92 @@ import re
 import sys
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse, quote
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Any
+from urllib.parse import parse_qs, urlparse, urlunparse, urlencode
 
 import aiohttp
+from aiohttp import ClientSession, TCPConnector
+from rich.console import Console
+from rich.progress import (
+    BarColumn, MofNCompleteColumn, Progress,
+    SpinnerColumn, TextColumn, TimeElapsedColumn,
+)
+from rich.table import Table
 
-try:
-    from reconk.scripts.common import clean_host, is_hostname, read_lines, unique_preserve
-except ImportError:
-    import sys
-    from pathlib import Path
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+console = Console()
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from reconk.scripts.common import clean_host, is_hostname, read_lines, unique_preserve
+BANNER = r"""
+⠀⠀⢀⡟⢀⡏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣧⠈⣧⠀⠀
+⠀⠀⣼⠀⣼⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⡆⢸⡆⠀
+⠀⢰⣿⠀⠻⠧⣤⡴⣦⣤⣤⣤⣠⡶⣤⣤⠾⠗⠈⣿⠀
+⠀⠺⣷⡶⠖⠛⣩⣭⣿⣿⣿⣿⣿⣯⣭⡙⠛⠶⣶⡿⠃
+⠀⠀⠀⢀⣤⠾⢋⣴⠟⣿⣿⣿⡟⢷⣬⠙⢷⣄⠀⠀⠀
+⢀⣠⡴⠟⠁⠀⣾⡇⠀⣿⣿⣿⡇⠀⣿⡇⠀⠙⠳⣦⣀
+⢸⡏⠀⠀⠀⠀⢿⡇⠀⢸⣿⣿⠁⠀⣿⡇⠀⠀⠀⠈⣿
+⠀⣷⠀⠀⠀⠀⢸⡇⠀⠀⢻⠇⠀⠀⣿⠇⠀⠀⠀⠀⣿
+⠀⢿⠀⠀⠀⠀⢸⡇⠀⠀⠀⠀⠀⠀⣿⠀⠀⠀⠀⢸⡏
+⠀⠘⡇⠀⠀⠀⠈⣷⠀⠀⠀⠀⠀⢀⡟⠀⠀⠀⠀⡾⠀
+⠀⠀⠹⠀⠀⠀⠀⢻⠀⠀⠀⠀⠀⢸⠇⠀⠀⠀⢰⠁⠀
+⠀⠀⠀⠁⠀⠀⠀⠈⢇⠀⠀⠀⠀⡞⠀⠀⠀⠀⠁⠀⠀
+"""
 
-TAG = "\033[1;36m[*]\033[0m" if sys.stdout.isatty() else "[*]"
-OK = "\033[1;32m[+]\033[0m" if sys.stdout.isatty() else "[+]"
+# ─────────────────────────────────────────────────────────────────────────────
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.5735.131 Mobile Safari/537.36",
 ]
 
-SEM_LIMITS: Dict[str, int] = {
-    "wayback": 4, "commoncrawl": 5, "alienvault": 5, "urlscan": 3,
-    "virustotal": 2, "crtsh": 4, "rapiddns": 6, "hackertarget": 5, "github": 2,
+SENSITIVE_EXTS = frozenset((
+    ".json", ".env", ".conf", ".config", ".db", ".log", ".cnf",
+    ".yaml", ".yml", ".xml", ".ini", ".bak", ".backup", ".sql",
+    ".pem", ".key", ".crt", ".p12", ".pfx", ".der",
+    ".zip", ".tar", ".gz", ".tgz", ".rar",
+    ".csv", ".xls", ".xlsx", ".doc", ".docx",
+    ".php", ".asp", ".aspx", ".cgi", ".pl",
+))
+IMAGE_EXTS = frozenset((".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp", ".tiff"))
+MEDIA_EXTS  = frozenset((".mp4", ".mp3", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mkv", ".ogg", ".wav"))
+
+
+SOURCE_SEM_LIMITS: dict[str, int] = {
+    "wayback": 2, "commoncrawl": 3,
 }
 
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# Data Structures
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class CrawlResult:
+    domain: str
+    urls: set = field(default_factory=set)
+    per_source: dict = field(default_factory=lambda: defaultdict(int))
+    subdomains: set = field(default_factory=set)
+    errors: list = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+
+    def add(self, source: str, new_urls: list[str]) -> int:
+        before = len(self.urls)
+        self.urls.update(u for u in new_urls if u)
+        self.per_source[source] = len(new_urls)
+        return len(self.urls) - before
 
 
-# --------------------------------------------------------------------------- #
-# fetch core
-# --------------------------------------------------------------------------- #
-async def _fetch_text(session, url: str, headers=None, timeout: int = 30,
-                      allow_status=(200,), retries: int = 2, sem=None) -> Optional[str]:
-    hdrs = {"User-Agent": random.choice(USER_AGENTS), "Accept-Encoding": "gzip, deflate"}
-    if headers:
-        hdrs.update(headers)
-    for attempt in range(retries):
-        try:
-            if sem is None:
-                resp = session.get(url, headers=hdrs,
-                                   timeout=aiohttp.ClientTimeout(total=timeout), ssl=False)
-                response = await resp
-                try:
-                    if response.status not in allow_status:
-                        return None
-                    return await response.text(errors="replace")
-                finally:
-                    response.close()
-            else:
-                async with sem:
-                    async with session.get(url, headers=hdrs,
-                                           timeout=aiohttp.ClientTimeout(total=timeout),
-                                           ssl=False) as response:
-                        if response.status not in allow_status:
-                            return None
-                        return await response.text(errors="replace")
-        except (asyncio.TimeoutError, aiohttp.ClientError, aiohttp.ClientResponseError):
-            if attempt < retries - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
-        except Exception:  # noqa: BLE001
-            return None
-    return None
-
-
-# --------------------------------------------------------------------------- #
-# sources
-# --------------------------------------------------------------------------- #
-async def fetch_wayback(domain: str, session, sem) -> List[str]:
-    url = (f"https://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text"
-           f"&collapse=urlkey&fl=original&filter=statuscode:200&limit=200000")
-    async with sem:
-        for _ in range(3):
-            try:
-                async with session.get(url, headers={"User-Agent": random.choice(USER_AGENTS)},
-                                       timeout=aiohttp.ClientTimeout(total=60), ssl=False) as resp:
-                    if resp.status == 200:
-                        return [line.strip() for line in (await resp.text(errors="replace")).splitlines()
-                                if line.strip().startswith("http")]
-                    return []
-            except Exception:  # noqa: BLE001
-                await asyncio.sleep(2)
-    return []
-
-
-async def fetch_commoncrawl(domain: str, session, sem) -> List[str]:
-    urls: Set[str] = set()
-    coll = await _fetch_text(session, "https://index.commoncrawl.org/collinfo.json", sem=sem, timeout=20)
-    if not coll:
-        return []
-    try:
-        indexes = [item["cdx-api"] for item in json.loads(coll)[:3]]
-    except Exception:  # noqa: BLE001
-        return []
-
-    async def _query(api: str):
-        q = f"{api}?url=*.{domain}/*&output=json&limit=20000&filter=status:200"
-        text = await _fetch_text(session, q, sem=sem, timeout=45)
-        if not text:
-            return
-        for line in text.splitlines():
-            try:
-                u = json.loads(line).get("url", "")
-                if u:
-                    urls.add(u)
-            except Exception:  # noqa: BLE001
-                continue
-
-    await asyncio.gather(*[_query(a) for a in indexes])
-    return list(urls)
-
-
-async def fetch_alienvault(domain: str, session, sem) -> List[str]:
-    out: List[str] = []
-    page = 1
-    while True:
-        data = await _fetch_text(session,
-                                 f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=500&page={page}",
-                                 sem=sem, timeout=30)
-        if not data:
-            break
-        try:
-            obj = json.loads(data)
-        except Exception:  # noqa: BLE001
-            break
-        items = obj.get("url_list", [])
-        if not items:
-            break
-        out += [i.get("url", "") for i in items if i.get("url")]
-        if not obj.get("has_next"):
-            break
-        page += 1
-        await asyncio.sleep(0.3)
-    return out
-
-
-async def fetch_urlscan(domain: str, session, sem, key: str) -> List[str]:
-    if not key:
-        return []
-    urls: Set[str] = set()
-    headers = {"API-Key": key}
-    cursor = None
-    for _ in range(5):
-        q = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size=1000"
-        if cursor:
-            q += f"&search_after={cursor}"
-        data = await _fetch_text(session, q, headers=headers, sem=sem, allow_status=(200, 429), timeout=40)
-        if not data:
-            break
-        try:
-            obj = json.loads(data)
-        except Exception:  # noqa: BLE001
-            break
-        for r in obj.get("results", []) or []:
-            for u in (r.get("page") or {}).get("url", ""), (r.get("task") or {}).get("url", ""):
-                if isinstance(u, str) and u.startswith("http"):
-                    urls.add(u)
-            for lnk in r.get("links", []) or []:
-                href = lnk.get("href", "")
-                if isinstance(href, str) and href.startswith("http"):
-                    urls.add(href)
-        if obj.get("has_more") and obj.get("results"):
-            sort = obj["results"][-1].get("sort", [])
-            if not sort:
-                break
-            cursor = ",".join(str(s) for s in sort)
-            await asyncio.sleep(0.5)
-        else:
-            break
-    return list(urls)
-
-
-async def fetch_virustotal(domain: str, session, sem, key: str) -> List[str]:
-    if not key:
-        return []
-    urls: Set[str] = set()
-    headers = {"x-apikey": key}
-    cursor = None
-    for _ in range(8):
-        q = f"https://www.virustotal.com/api/v3/domains/{domain}/urls?limit=40"
-        if cursor:
-            q += f"&cursor={cursor}"
-        data = await _fetch_text(session, q, headers=headers, sem=sem, allow_status=(200, 204), timeout=40)
-        if not data:
-            break
-        try:
-            obj = json.loads(data)
-        except Exception:  # noqa: BLE001
-            break
-        for item in obj.get("data", []) or []:
-            u = (item.get("attributes") or {}).get("url") or item.get("id", "")
-            if u:
-                urls.add(u)
-        cursor = (obj.get("meta") or {}).get("cursor")
-        if not cursor:
-            break
-        await asyncio.sleep(1.2)
-    return list(urls)
-
-
-async def fetch_crtsh_hosts(domain: str, session, sem) -> List[str]:
-    data = await _fetch_text(session, f"https://crt.sh/?q=%25.{domain}&output=json", sem=sem, timeout=60)
-    if not data:
-        return []
-    hosts: Set[str] = set()
-    try:
-        obj = json.loads(data)
-        for entry in obj:
-            for f in ("name_value", "common_name"):
-                for name in str(entry.get(f, "")).splitlines():
-                    name = clean_host(name)
-                    if is_hostname(name) and name.endswith("." + domain):
-                        hosts.add(name)
-    except Exception:  # noqa: BLE001
-        pass
-    return list(hosts)
-
-
-async def fetch_rapiddns(domain: str, session, sem) -> List[str]:
-    text = await _fetch_text(session, f"https://rapiddns.io/subdomain/{domain}?full=1", sem=sem, timeout=30)
-    if not text:
-        return []
-    found = re.findall(r"(?:^|[\s\"'>])([a-zA-Z0-9\-\.]+\.re\.escape(domain))", "")  # placeholder, replaced below
-    found = re.findall(r"(?:^|[\s\"'>])([a-zA-Z0-9\-\.]+\.)" + re.escape(domain) + r"(?:[\s\"'<]|$)", text)
-    return sorted({f"https://{f}.{domain}" for f in found if f and f != domain})
-
-
-async def fetch_hackertarget(domain: str, session, sem) -> List[str]:
-    text = await _fetch_text(session, f"https://api.hackertarget.com/hostsearch/?q={domain}", sem=sem, timeout=30)
-    if not text or "error" in text[:100].lower() or "API count exceeded" in text:
-        return []
-    urls: Set[str] = set()
-    for line in text.splitlines():
-        parts = line.split(",")
-        if parts and parts[0].strip():
-            urls.add(f"https://{parts[0].strip()}")
-    return list(urls)
-
-
-async def fetch_github(domain: str, session, sem, token: str) -> List[str]:
-    if not token:
-        return []
-    urls: Set[str] = set()
-    headers = {"Accept": "application/vnd.github.v3+json", "Authorization": f"token {token}"}
-    queries = [f'"{domain}" path:*.js', f'"{domain}" path:*.json', f'"{domain}" path:*.env']
-    for q in queries:
-        api = f"https://api.github.com/search/code?q={quote(q)}&per_page=20"
-        data = await _fetch_text(session, api, headers=headers, sem=sem, allow_status=(200, 403, 422), timeout=30)
-        if data:
-            try:
-                obj = json.loads(data)
-                for item in obj.get("items", []) or []:
-                    raw = (item.get("html_url", "")
-                           .replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/"))
-                    text = await _fetch_text(session, raw, sem=sem, timeout=15)
-                    if text:
-                        for m in re.finditer(r'https?://[^\s"\'<>]+', text):
-                            u = m.group(0)
-                            if domain in u and u.startswith("http"):
-                                urls.add(u)
-            except Exception:  # noqa: BLE001
-                pass
-        await asyncio.sleep(2)
-    return list(urls)
-
-
-# --------------------------------------------------------------------------- #
-# orchestrator
-# --------------------------------------------------------------------------- #
+# ─────────────────────────────────────────────────────────────────────────────
+# URL Utilities
+# ─────────────────────────────────────────────────────────────────────────────
 def normalize_url(url: str) -> str:
     try:
         url = url.strip()
@@ -322,132 +119,499 @@ def normalize_url(url: str) -> str:
             params = sorted(parse_qs(p.query, keep_blank_values=True).items())
             query = urlencode(params, doseq=True)
         return urlunparse((scheme, netloc, path, p.params, query, ""))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return url.strip()
 
-
-def urlunparse_(*parts):  # noqa: ANN001
-    return urlunparse(*parts)
-
-
-def in_domain(url: str, roots: List[str]) -> bool:
+def is_valid_url(url: str) -> bool:
     try:
-        host = (urlparse(url).hostname or "").lower()
-        return any(host == r or host.endswith("." + r) for r in roots)
-    except Exception:  # noqa: BLE001
+        p = urlparse(url.strip())
+        return p.scheme in ("http", "https") and bool(p.netloc) and len(url) < 2048
+    except Exception:
         return False
 
-
-def extract_subdomains(urls: List[str], roots: List[str]) -> List[str]:
-    subs: Set[str] = set()
-    for u in urls:
-        host = (urlparse(u).hostname or "").lower()
-        if host:
-            for r in roots:
-                if host.endswith("." + r) and host != r:
-                    subs.add(host)
-    return sorted(subs)
-
-
-async def harvest_domain(domain: str, args, session, keys) -> Dict[str, List[str]]:
-    sems = {n: asyncio.Semaphore(v) for n, v in SEM_LIMITS.items()}
-    tasks = {
-        "wayback": fetch_wayback(domain, session, sems["wayback"]),
-        "commoncrawl": fetch_commoncrawl(domain, session, sems["commoncrawl"]),
-        "alienvault": fetch_alienvault(domain, session, sems["alienvault"]),
-        "crtsh": fetch_crtsh_hosts(domain, session, sems["crtsh"]),
-        "rapiddns": fetch_rapiddns(domain, session, sems["rapiddns"]),
-        "hackertarget": fetch_hackertarget(domain, session, sems["hackertarget"]),
-    }
-    if keys.get("urlscan"):
-        tasks["urlscan"] = fetch_urlscan(domain, session, sems["urlscan"], keys["urlscan"])
-    if keys.get("virustotal"):
-        tasks["virustotal"] = fetch_virustotal(domain, session, sems["virustotal"], keys["virustotal"])
-    if keys.get("github"):
-        tasks["github"] = fetch_github(domain, session, sems["github"], keys["github"])
-
-    log(f"  {TAG} {domain}: {len(tasks)} sources in parallel")
-    results = {}
-    for name, coro in tasks.items():
-        try:
-            raw = await coro
-            results[name] = [normalize_url(u) for u in raw or [] if u.startswith("http")]
-            log(f"    {OK} {name:<12} -> {len(results[name]):,}")
-        except Exception as e:  # noqa: BLE001
-            log(f"    [WARN] {name}: {e}")
-            results[name] = []
-    return results
-
-
-async def async_main(args) -> int:
-    domains = [args.domain] if args.domain else read_lines(args.list)
-    domains = unique_preserve(d for d in domains if d and "." in d)
-    if not domains:
-        print("no domains", file=sys.stderr)
-        return 1
-
-    keys = {
-        "urlscan": args.urlscan_key,
-        "virustotal": args.virustotal_key,
-        "github": args.github_token,
-    }
-
-    connector = aiohttp.TCPConnector(ssl=False, limit=200, limit_per_host=15, ttl_dns_cache=300)
-    timeout = aiohttp.ClientTimeout(total=300, connect=10)
-    t0 = time.monotonic()
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        all_urls: Set[str] = set()
-        per_source: Dict[str, List[str]] = defaultdict(list)
-        for domain in domains:
-            results = await harvest_domain(domain, args, session, keys)
-            for name, urls in results.items():
-                all_urls.update(urls)
-                per_source[name].extend(urls)
-
-    final_urls = [u for u in sorted(all_urls) if in_domain(u, domains)]
-    log(f"\n{OK} total unique URLs: {len(final_urls):,}")
-
-    with open(args.output, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(final_urls) + "\n")
-    log(f"{OK} urls -> {args.output}")
-
-    if args.per_source:
-        import os
-
-        os.makedirs(args.per_source, exist_ok=True)
-        for name, urls in per_source.items():
-            keep = [u for u in sorted(set(urls)) if in_domain(u, domains)]
-            with open(os.path.join(args.per_source, f"{name}.txt"), "w", encoding="utf-8") as fh:
-                fh.write("\n".join(keep) + "\n")
-        log(f"{OK} per-source files -> {args.per_source}")
-
-    if args.subs:
-        subs = extract_subdomains(final_urls, domains)
-        with open(args.subs, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(subs) + "\n")
-        log(f"{OK} {len(subs)} subdomains from URLs -> {args.subs}")
-
-    log(f"{OK} harvesting done in {time.monotonic() - t0:.1f}s")
-    return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="reconk harvester — async multi-source URL harvesting")
-    grp = parser.add_mutually_exclusive_group(required=True)
-    grp.add_argument("-d", "--domain", help="single domain")
-    grp.add_argument("-dL", "--list", help="file with domains (one per line)")
-    parser.add_argument("-o", "--output", default="urls.txt", help="all URLs text file")
-    parser.add_argument("--per-source", help="dir for per-source txt files")
-    parser.add_argument("--subs", help="output file for subdomains discovered in URLs")
-    parser.add_argument("--urlscan-key", default="", help="urlscan.io API key")
-    parser.add_argument("--virustotal-key", default="", help="virustotal API key")
-    parser.add_argument("--github-token", default="", help="github PAT for code dorking")
-    args = parser.parse_args()
+def get_extension(url: str) -> str:
     try:
-        return asyncio.run(async_main(args))
+        path = urlparse(url).path.lower()
+        if "." in path:
+            ext = "." + path.rsplit(".", 1)[-1].split("?")[0]
+            return ext if len(ext) <= 8 else ""
+    except Exception:
+        pass
+    return ""
+
+def extract_param_keys(url: str) -> list[str]:
+    try:
+        qs = urlparse(url).query
+        return list(parse_qs(qs).keys()) if qs else []
+    except Exception:
+        return []
+
+def extract_hostname(raw: str) -> str:
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    return urlparse(raw).hostname or raw
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP Core  ← THE FIX: read body inside context, return data not response obj
+# ─────────────────────────────────────────────────────────────────────────────
+async def _fetch_raw(
+    session: ClientSession,
+    url: str,
+    headers: Optional[dict] = None,
+    timeout: int = 30,
+    as_json: bool = False,
+    as_bytes: bool = False,
+    allow_status: tuple = (200,),
+) -> Optional[Any]:
+    """
+    Core fetch. Returns str (text), dict/list (json), or bytes.
+    Reads the full body INSIDE the response context to avoid ClientResponseError.
+    Returns None on any error / non-2xx status.
+    """
+    hdrs = {"User-Agent": random.choice(USER_AGENTS), "Accept-Encoding": "gzip, deflate"}
+    if headers:
+        hdrs.update(headers)
+    try:
+        async with session.get(
+            url,
+            headers=hdrs,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=True,
+            ssl=False,
+        ) as resp:
+            if resp.status not in allow_status:
+                return None
+            if as_json:
+                try:
+                    return await resp.json(content_type=None)
+                except Exception:
+                    raw = await resp.text(errors="replace")
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        return None
+            elif as_bytes:
+                return await resp.read()
+            else:
+                return await resp.text(errors="replace")
+    except asyncio.TimeoutError:
+        return None
+    except aiohttp.ClientResponseError:
+        return None
+    except aiohttp.ClientError:
+        return None
+    except Exception:
+        return None
+
+
+async def fetch_text(
+    session: ClientSession, url: str,
+    headers: Optional[dict] = None,
+    sem: Optional[asyncio.Semaphore] = None,
+    timeout: int = 30,
+    allow_status: tuple = (200,),
+    max_retries: int = 3,
+) -> Optional[str]:
+    sem_ctx = sem or asyncio.Semaphore(999)
+    async with sem_ctx:
+        for attempt in range(max_retries):
+            result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
+                                       allow_status=allow_status)
+            if result is not None:
+                return result
+            # Only retry on genuine transient failures (network), not 4xx
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        return None
+
+
+async def fetch_json(
+    session: ClientSession, url: str,
+    headers: Optional[dict] = None,
+    sem: Optional[asyncio.Semaphore] = None,
+    timeout: int = 30,
+    allow_status: tuple = (200,),
+    max_retries: int = 3,
+) -> Optional[Any]:
+    sem_ctx = sem or asyncio.Semaphore(999)
+    async with sem_ctx:
+        for attempt in range(max_retries):
+            result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
+                                       as_json=True, allow_status=allow_status)
+            if result is not None:
+                return result
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source Fetchers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaphore,
+                         max_retries: int = 2) -> list[str]:
+    """Wayback Machine CDX API — optimized for speed with rate-limit resilience."""
+    url = (
+        f"https://web.archive.org/cdx/search/cdx"
+        f"?url=*.{domain}/*&output=text&collapse=urlkey"
+        f"&fl=original&filter=statuscode:200&limit=5000000"
+    )
+    async with sem:
+        for attempt in range(max_retries):
+            urls: list[str] = []
+            ua = random.choice(USER_AGENTS)
+            try:
+                async with session.get(
+                    url,
+                    headers={
+                        "User-Agent": ua,
+                        "Accept-Encoding": "gzip, deflate",
+                        "Accept": "text/plain",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=None, connect=15),
+                    ssl=False,
+                ) as resp:
+                    if resp.status == 200:
+                        async for raw_line in resp.content:
+                            line = raw_line.decode("utf-8", errors="replace").strip()
+                            if line and line.startswith("http"):
+                                urls.append(line)
+                        return urls
+                    elif resp.status in (429, 503):
+                        console.print(f"  [dim]⚠ Wayback: HTTP {resp.status} (rate limited)"
+                                      f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(5 + random.uniform(0, 3))
+                        continue
+                    elif resp.status in (403, 404):
+                        console.print(f"  [dim]⚠ Wayback: HTTP {resp.status} — blocked or no data[/dim]")
+                        return urls
+                    else:
+                        console.print(f"  [dim]⚠ Wayback: HTTP {resp.status}[/dim]")
+                        return urls
+            except asyncio.TimeoutError:
+                console.print(f"  [dim]⚠ Wayback: timeout"
+                              f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
+            except (aiohttp.ClientError, OSError) as e:
+                console.print(f"  [dim]⚠ Wayback: {type(e).__name__}"
+                              f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
+            except Exception as e:
+                console.print(f"  [dim]⚠ Wayback: {type(e).__name__}[/dim]")
+                return urls
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+        return []
+
+
+async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Semaphore) -> list[str]:
+    """Common Crawl — 2 most recent indexes with fast fail."""
+    urls: set[str] = set()
+    index_data = await fetch_json(
+        session, "https://index.commoncrawl.org/collinfo.json",
+        sem=sem, timeout=15,
+    )
+    if not index_data:
+        return []
+
+    # Only use 2 most recent indexes — they overlap heavily
+    indexes = [item["cdx-api"] for item in index_data[:2] if "cdx-api" in item]
+    if not indexes:
+        return []
+
+    async def _query(api_url: str):
+        ua = random.choice(USER_AGENTS)
+        q = (
+            f"{api_url}?url=*.{domain}/*&output=json"
+            f"&filter=status:200&fl=url"
+        )
+        try:
+            async with session.get(
+                q,
+                headers={"User-Agent": ua, "Accept-Encoding": "gzip"},
+                timeout=aiohttp.ClientTimeout(total=None, connect=10),
+                ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    return
+                raw = await resp.text(errors="replace")
+                for line in raw.strip().splitlines():
+                    try:
+                        u = json.loads(line).get("url", "")
+                        if u:
+                            urls.add(u)
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            pass  # fail silently — not critical
+
+    await asyncio.gather(*[_query(api) for api in indexes])
+    return list(urls)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+async def process_domain(domain: str, args: argparse.Namespace, session: ClientSession) -> CrawlResult:
+    result = CrawlResult(domain=domain)
+    sems = {name: asyncio.Semaphore(n) for name, n in SOURCE_SEM_LIMITS.items()}
+
+    # Phase 1: all passive sources in parallel
+    passive_tasks: dict[str, Any] = {
+        "wayback":        fetch_wayback(domain, session, sems["wayback"]),
+        "commoncrawl":    fetch_commoncrawl(domain, session, sems["commoncrawl"]),
+    }
+
+    source_names = list(passive_tasks.keys())
+    coros = list(passive_tasks.values())
+
+    console.print(f"\n[bold cyan]⚡ Phase 1 — {len(source_names)} sources in parallel for: [green]{domain}[/green][/bold cyan]")
+
+    gathered: list[list[str]] = [[] for _ in coros]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        prog_task = progress.add_task("[cyan]Passive recon", total=len(source_names))
+
+        async def _run(i: int, coro, name: str):
+            try:
+                r = await coro
+                gathered[i] = r or []
+            except Exception as e:
+                result.errors.append(f"{name}: {type(e).__name__}: {e}")
+                gathered[i] = []
+            progress.advance(prog_task)
+            cnt = len(gathered[i])
+            color = "green" if cnt > 0 else "dim"
+            progress.print(f"  [{color}]✓[/{color}] [bold]{name}[/bold] → [yellow]{cnt:,}[/yellow]")
+
+        await asyncio.gather(*[_run(i, c, source_names[i]) for i, c in enumerate(coros)])
+
+    # Aggregate Phase 1
+    for name, raw in zip(source_names, gathered):
+        clean = [normalize_url(u) for u in raw if is_valid_url(u)]
+        result.add(name, clean)
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────────
+def classify_urls(urls: set[str]) -> dict[str, list[str]]:
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for url in sorted(urls):
+        ext = get_extension(url)
+        buckets["all"].append(url)
+        if "?" in url:
+            buckets["params"].append(url)
+        if ext == ".js":
+            buckets["js"].append(url)
+        elif ext == ".pdf":
+            buckets["pdf"].append(url)
+        elif ext in SENSITIVE_EXTS:
+            buckets["sensitive"].append(url)
+        elif ext in IMAGE_EXTS:
+            buckets["images"].append(url)
+        elif ext in MEDIA_EXTS:
+            buckets["media"].append(url)
+        else:
+            buckets["other"].append(url)
+    return dict(buckets)
+
+
+def save_results(result: CrawlResult, args: argparse.Namespace):
+    domain = result.domain
+    base = Path(getattr(args, "output", None) or "results").expanduser()
+    buckets = classify_urls(result.urls)
+
+    param_keys: set[str] = set()
+    for url in result.urls:
+        param_keys.update(extract_param_keys(url))
+
+    dirs = {
+        "urls":       base / "urls",
+        "params":     base / "parameters",
+        "js":         base / "js",
+        "sensitive":  base / "sensitive",
+        "pdf":        base / "pdfs",
+        "images":     base / "images",
+        "media":      base / "media",
+        "subdomains": base / "subdomains",
+        "reports":    base / "reports",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+
+    file_map = {
+        "all":       dirs["urls"]      / f"{domain}.txt",
+        "params":    dirs["params"]    / f"{domain}.txt",
+        "js":        dirs["js"]        / f"{domain}.txt",
+        "sensitive": dirs["sensitive"] / f"{domain}.txt",
+        "pdf":       dirs["pdf"]       / f"{domain}.txt",
+        "images":    dirs["images"]    / f"{domain}.txt",
+        "media":     dirs["media"]     / f"{domain}.txt",
+    }
+
+    for bucket, path in file_map.items():
+        items = buckets.get(bucket, [])
+        if items:
+            path.write_text("\n".join(items) + "\n", encoding="utf-8")
+
+    # Param keys
+    if param_keys:
+        (dirs["params"] / f"{domain}_param_keys.txt").write_text(
+            "\n".join(sorted(param_keys)) + "\n", encoding="utf-8"
+        )
+
+    # Subdomains (unique hosts found across all URLs)
+    all_hosts: set[str] = set()
+    for url in result.urls:
+        h = urlparse(url).hostname
+        if h and domain in h:
+            all_hosts.add(h)
+    if all_hosts:
+        (dirs["subdomains"] / f"{domain}.txt").write_text(
+            "\n".join(sorted(all_hosts)) + "\n", encoding="utf-8"
+        )
+
+    # JSON report
+    elapsed = time.time() - result.started_at
+    report = {
+        "domain": domain,
+        "crawled_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_seconds": round(elapsed, 2),
+        "total_unique_urls": len(result.urls),
+        "unique_subdomains": len(all_hosts),
+        "unique_param_keys": len(param_keys),
+        "per_source": dict(sorted(result.per_source.items(), key=lambda x: -x[1])),
+        "buckets": {k: len(v) for k, v in buckets.items()},
+        "param_keys": sorted(param_keys),
+        "errors": result.errors,
+    }
+    report_path = dirs["reports"] / f"{domain}.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    # ── Terminal output ───────────────────────────────────────────────────────
+    table = Table(title=f"[bold]Results — {domain}[/bold]", border_style="cyan", show_lines=True)
+    table.add_column("Category", style="bold white")
+    table.add_column("Count", justify="right", style="bright_green")
+    table.add_column("Saved to", style="dim")
+
+    rows = [
+        ("🔗 All URLs",         "all",       file_map["all"]),
+        ("📌 With parameters",  "params",    file_map["params"]),
+        ("⚙️  JavaScript",      "js",        file_map["js"]),
+        ("🔐 Sensitive files",  "sensitive", file_map["sensitive"]),
+        ("📄 PDFs",             "pdf",       file_map["pdf"]),
+        ("🖼  Images",          "images",    file_map["images"]),
+        ("🎬 Media",            "media",     file_map["media"]),
+    ]
+    for label, bucket, fpath in rows:
+        items = buckets.get(bucket, [])
+        if items:
+            table.add_row(label, f"{len(items):,}", str(fpath))
+
+    if all_hosts:
+        table.add_row("🌐 Subdomains", f"{len(all_hosts):,}",
+                      str(dirs["subdomains"] / f"{domain}.txt"))
+
+    console.print(table)
+
+    src_table = Table(title="Per-Source Breakdown", border_style="magenta", show_lines=True)
+    src_table.add_column("Source", style="bold")
+    src_table.add_column("URLs", justify="right", style="yellow")
+    for src, cnt in sorted(result.per_source.items(), key=lambda x: -x[1]):
+        src_table.add_row(src, f"{cnt:,}")
+    console.print(src_table)
+
+    console.print(
+        f"\n[bold yellow]📋 Report:[/bold yellow] {report_path}\n"
+        f"[bold yellow]⏱  Time:[/bold yellow] {elapsed:.1f}s  "
+        f"[bold yellow]|[/bold yellow]  "
+        f"[bold green]🔗 Total unique URLs: {len(result.urls):,}[/bold green]  "
+        f"[bold yellow]|[/bold yellow]  "
+        f"[cyan]🌐 Subdomains: {len(all_hosts):,}[/cyan]\n"
+    )
+
+    if result.errors:
+        console.print(f"[dim]⚠ {len(result.errors)} non-fatal errors logged in report.[/dim]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────────────────────────────────────
+async def async_main(args: argparse.Namespace):
+    connector = TCPConnector(
+        ssl=False,
+        limit=200,
+        limit_per_host=15,
+        ttl_dns_cache=300,
+        enable_cleanup_closed=True,
+    )
+    timeout = aiohttp.ClientTimeout(total=300, connect=10)
+    async with ClientSession(connector=connector, timeout=timeout) as session:
+        if args.domain:
+            domains = [extract_hostname(args.domain)]
+        else:
+            path = Path(args.list).expanduser()
+            if not path.exists():
+                console.print(f"[red][!] File not found: {args.list}[/red]")
+                sys.exit(1)
+            raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            seen: dict[str, None] = {}
+            for line in raw_lines:
+                h = extract_hostname(line)
+                if h:
+                    seen[h] = None
+            domains = list(seen.keys())
+
+        for domain in domains:
+            result = await process_domain(domain, args, session)
+            save_results(result, args)
+
+
+def main():
+    console.print(f"[yellow]{BANNER}[/yellow]")
+    console.print(f"[bold yellow]{'SpiderCrawl v4':^42}[/bold yellow]")
+    console.print(f"[dim]{'by nk — async, multi-source, JS-aware URL harvester':^52}[/dim]\n")
+
+    parser = argparse.ArgumentParser(
+        description="SpiderCrawl v4 — Async URL harvester. Crawls everything.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-d", "--domain", metavar="DOMAIN",
+                       help="Single domain to crawl (e.g. example.com)")
+    group.add_argument("-l", "--list", metavar="FILE",
+                       help="File with one domain per line")
+    parser.add_argument("-o", "--output", metavar="DIR", default="results",
+                       help="Output directory (default: ./results)")
+    parser.add_argument("--proxy", metavar="URL",
+                       help="HTTP/HTTPS proxy (e.g. http://127.0.0.1:8080)")
+
+    args = parser.parse_args()
+
+    if not args.domain and not args.list:
+        parser.error("provide -d/--domain or -l/--list")
+
+    try:
+        asyncio.run(async_main(args))
     except KeyboardInterrupt:
-        return 130
+        console.print("\n[bold red][!] Interrupted by user.[/bold red]")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
