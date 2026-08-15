@@ -93,10 +93,11 @@ class PortScanModule(Module):
         # scope_cidrs harvested by asn_recon (horizontal phase)
         targets.update(self.ctx.out.read(self.category, "scope_cidrs.txt"))
 
-        # subdomain IPs
-        subdomain_hosts: Set[str] = set()
-        for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
-            subdomain_hosts.update(self.ctx.out.read("subdomains", fname))
+        # subdomain IPs: use the merge phase's canonical lists when present
+        subdomain_hosts: Set[str] = set(self.ctx.out.read("subdomains", "resolved_subdomains.txt"))
+        if not subdomain_hosts:
+            for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
+                subdomain_hosts.update(self.ctx.out.read("subdomains", fname))
         subdomain_hosts.update(self.ctx.scope.hosts_to_probe())
 
         if subdomain_hosts:

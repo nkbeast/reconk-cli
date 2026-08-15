@@ -63,7 +63,12 @@ External tools (must be in `PATH`):
    - *Both* — collect all single domains first, then all wildcard scopes,
      then the permutation question. **Single engagement runs first**, then
      the wildcard engagement.
-3. Phases stream live and save their outputs as they complete.
+3. **Phases to skip** — multi-select of any phase (dns, passive, merge,
+   live, ports, ...). Leave empty to run everything.
+4. Everything you answered is saved to the target directory **before any
+   recon starts**: `scope.txt`, `inputs.txt` (full run spec) and
+   `config.txt` (active config snapshot). Then phases stream live and save
+   their outputs as they complete.
 
 ## Native scripts
 
@@ -81,20 +86,31 @@ External tools (must be in `PATH`):
 
 ```
 ~/Documents/bugbounty/reconk/<target>/
-├── scope.txt
-├── summary.txt
+├── scope.txt                # every in-scope entry
+├── inputs.txt               # full run spec (choices, files used)
+├── config.txt               # active config snapshot
 ├── logs/                    # per-phase command logs
 ├── 01-dns/                  # dns.txt — records + zone transfer
 ├── 02-subdomains/           # passive.txt / active.txt / vertical.txt / horizontal.txt
+│                            # + all_subdomains.txt (merged, in-scope, unique)
+│                            # + resolved_subdomains.txt (subset that resolves)
 ├── 03-live/                 # alive.txt, alive_details.txt, status_codes.txt
 ├── 04-ports/                # naabu_ports.txt, host_port_summary.txt, prefixes.txt
-├── 05-urls/                 # all_urls.txt + sources/<source>.txt
+├── 05-urls/                 # all_urls.txt + sources/<source>.txt + harvest_input.txt
 ├── 06-parameters/           # param_urls.txt, param_keys.txt, gf_*.txt
 ├── 07-js/                   # js_files.txt, js_endpoints.txt, js_secrets.txt
 ├── 08-tech/                 # tech.txt
 ├── 09-takeover/             # takeover.txt
 └── 10-reports/              # summary.txt
 ```
+
+The **merge phase** (wildcard runs only, right after horizontal) collapses
+every subdomain source — passive, active, vertical, horizontal and
+URL-harvested hosts — into one canonical `all_subdomains.txt`, drops
+out-of-scope and wildcard entries, and writes the resolvable subset to
+`resolved_subdomains.txt` (via dnsx). Everything downstream (live, ports,
+urls, js, tech, takeover) reads those two files instead of re-merging
+sources itself.
 
 For "both" scopes the runs are separated:
 

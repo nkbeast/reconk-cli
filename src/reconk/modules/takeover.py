@@ -22,9 +22,11 @@ class TakeoverModule(Module):
     category = "takeover"
 
     def run(self) -> ModuleResult:
-        subs: List[str] = []
-        for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
-            subs += self.ctx.out.read("subdomains", fname)
+        subs: List[str] = self.ctx.out.read("subdomains", "all_subdomains.txt")
+        if not subs:
+            # fallback: merge on the fly (e.g. --only takeover after a partial run)
+            for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
+                subs += self.ctx.out.read("subdomains", fname)
         subs = sorted(set(subs))
         if not subs:
             return ModuleResult(self.name, message="no subdomains yet")

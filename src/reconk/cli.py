@@ -227,10 +227,90 @@ def _ask_skip(questionary) -> List[str]:
     return list(chosen or [])
 
 
+def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[str],
+                 wild_entries: List[str], permutation: bool, skip: List[str],
+                 nested: bool = False) -> Path:
+    """Save every input the user gave BEFORE any recon starts.
+
+    Writes into the output directory:
+      <base>/<target>/scope.txt      — every in-scope entry
+      <base>/<target>/inputs.txt     — full run spec (choices, files used)
+      <base>/<target>/config.txt     — active config snapshot
+    """
+    from datetime import datetime
+
+    base = Path(cfg.output_base_dir()).expanduser()
+    root = base / name
+    root.mkdir(parents=True, exist_ok=True)
+
+    all_entries = sorted(set(single_entries + wild_entries))
+    (root / "scope.txt").write_text("\n".join(all_entries) + "\n", encoding="utf-8")
+
+    plan_files = (
+        f"  dns        <- {root}/scope.txt            (scripts/dnsrecon.py -l)\n"
+        f"  passive    <- {root}/scope.txt            (subfinder -dL)\n"
+        f"  active     <- {root}/scope.txt            (puredns bruteforce -d)\n"
+        f"  vertical   <- {root}/scope.txt            (puredns + permutations)\n"
+        f"  horizontal <- {root}/scope.txt            (scripts/asn.py --scope)\n"
+        f"  merge      <- passive+active+vertical+horizontal.txt\n"
+        f"                -> all_subdomains.txt + resolved_subdomains.txt\n"
+        f"  live       <- {root}/probe_hosts.txt      (httpx -l, all_subdomains)\n"
+        f"  ports      <- {root}/04-ports/scan_targets.txt  (naabu -list, resolved IPs)\n"
+        f"  urls       <- {root}/harvest_input.txt    (scripts/harvester.py -dL, roots+subs)\n"
+        f"  js         <- {root}/katana_input.txt     (katana -list, alive)\n"
+        f"  tech       <- {root}/tech_input.txt       (scripts/tech.py -l, alive)\n"
+        f"  takeover   <- {root}/takeover_hosts.txt   (scripts/takeover.py -l, all_subdomains)\n"
+    )
+
+    lines = [
+        "=" * 62,
+        "  RECONK RUN SPEC",
+        "=" * 62,
+        f"  target      : {name}",
+        f"  created     : {datetime.now().isoformat(timespec='seconds')}",
+        f"  scope type  : {scope_type}",
+        f"  base dir    : {base}",
+        "",
+        "  SINGLE DOMAINS (no subdomain enumeration):",
+    ]
+    lines += [f"    - {e}" for e in sorted(single_entries)] or ["    (none)"]
+    lines += ["", "  WILDCARD SCOPES (full subdomain pipeline):"]
+    lines += [f"    - {e}" for e in sorted(wild_entries)] or ["    (none)"]
+    lines += [
+        "",
+        f"  permutation scan : {'yes' if permutation else 'no'}",
+        f"  skipped phases   : {', '.join(sorted(skip)) or 'none'}",
+        "",
+        "  PHASE INPUT FILES (every tool is driven via -l / file args):",
+        plan_files,
+        "  OUTPUT:",
+    ]
+    if nested:
+        if single_entries:
+            lines.append(f"    single   -> {base / name / 'single'}")
+        else:
+            lines.append("    single   -> (not in this run)")
+        if wild_entries:
+            lines.append(f"    wildcard -> {base / name / 'wildcard'}")
+        else:
+            lines.append("    wildcard -> (not in this run)")
+    else:
+        lines.append(f"    run      -> {root}")
+    lines.append("")
+    (root / "inputs.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    import yaml
+
+    (root / "config.txt").write_text(yaml.safe_dump(cfg.data, sort_keys=False), encoding="utf-8")
+    return root / "inputs.txt"
+
+
 def _tui_new_recon(cfg: Config) -> int:
-    """Guided new-recon setup: target -> scope type -> inputs -> run."""
+    """Guided new-recon setup: collect ALL inputs first, save them into the
+    output directory, then run every phase from the saved files."""
     import questionary
 
+    # ---- 1. collect everything --------------------------------------- #
     name = questionary.text("Target / company name", default="").ask()
     if not name or not name.strip():
         console.print("[red]! No target name given.[/red]")
@@ -248,76 +328,54 @@ def _tui_new_recon(cfg: Config) -> int:
     if not scope_type:
         return 2
 
-    # --------------------------------------------------------------- #
-    # single mode
-    # --------------------------------------------------------------- #
-    if "Single domains" in scope_type and "Both" not in scope_type:
-        entries = _tui_collect_entries(
+    single_entries: List[str] = []
+    wild_entries: List[str] = []
+    if scope_type.startswith("Single"):
+        single_entries = _tui_collect_entries(
             questionary, "Single domain(s) in scope (e.g. example.com)"
         )
-        if not entries:
-            console.print("[red]! No domains given.[/red]")
-            return 2
-        scope = Scope.from_input(name, ",".join(entries))
-        return _run_pipeline(cfg, scope, base_dir=str(cfg.output_base_dir()))
-
-    # --------------------------------------------------------------- #
-    # wildcard mode
-    # --------------------------------------------------------------- #
-    if "Wildcard domains" in scope_type and "Both" not in scope_type:
-        entries = _tui_collect_entries(
+    elif scope_type.startswith("Wildcard"):
+        wild_entries = _tui_collect_entries(
             questionary, "Wildcard scope(s) (e.g. *.example.com or example.com)"
         )
-        if not entries:
-            console.print("[red]! No wildcards given.[/red]")
-            return 2
-        skip = []
-        if not _tui_permutation(questionary):
-            skip.append("vertical")
-        scope = Scope.from_input(name, ",".join(entries), force_wildcard=True)
-        return _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()))
+    else:  # both
+        single_entries = _tui_collect_entries(
+            questionary, "Single domain(s) in scope — all of them, then wildcards"
+        )
+        wild_entries = _tui_collect_entries(
+            questionary, "Wildcard scope(s) (e.g. *.example.com or example.com)"
+        )
 
-    # --------------------------------------------------------------- #
-    # both single + wildcard: collect singles, then wildcards, run
-    # the single engagement first, then the wildcard one.
-    # --------------------------------------------------------------- #
-    single_entries = _tui_collect_entries(
-        questionary, "Single domain(s) in scope (comma separated)"
-    )
-    wild_entries = _tui_collect_entries(
-        questionary, "Wildcard scope(s) (e.g. *.example.com or example.com)"
-    )
     if not single_entries and not wild_entries:
         console.print("[red]! No scope given at all.[/red]")
         return 2
 
-    skip = []
-    if not (wild_entries and _tui_permutation(questionary)):
-        skip.append("vertical")
+    permutation = True
+    if wild_entries:
+        permutation = _tui_permutation(questionary)
 
+    skip = _ask_skip(questionary)
+    if wild_entries and not permutation:
+        skip = [s for s in skip if s != "vertical"] + ["vertical"]
+
+    # ---- 2. save inputs into the output dir, THEN start recon -------- #
+    nested = scope_type.startswith("Both")
+    inputs_path = _save_inputs(
+        cfg, name, scope_type, single_entries, wild_entries, permutation, skip,
+        nested=nested,
+    )
+    console.print(f"  [green]✔ inputs saved: {inputs_path}[/green]")
+
+    # ---- 3. run the engagements from the saved files ----------------- #
     rc = 0
     if single_entries:
         scope = Scope.from_input(name, ",".join(single_entries))
-        rc |= _run_pipeline(cfg, scope, base_dir=str(cfg.output_base_dir()),
-                            target_name=f"{name}/single")
+        rc |= _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()),
+                            target_name=f"{name}/single" if nested else name)
     if wild_entries:
         scope = Scope.from_input(name, ",".join(wild_entries), force_wildcard=True)
         rc |= _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()),
-                            target_name=f"{name}/wildcard")
-
-    # combined scope.txt + pointer report at the target root
-    base = Path(cfg.output_base_dir()).expanduser()
-    root = base / name
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "scope.txt").write_text(
-        "\n".join(sorted(set(single_entries + wild_entries))) + "\n", encoding="utf-8"
-    )
-    (root / "summary.txt").write_text(
-        f"Reconk run — {name}\n"
-        f"  single:   {base / name / 'single'}   (ran first)\n"
-        f"  wildcard: {base / name / 'wildcard'}\n",
-        encoding="utf-8",
-    )
+                            target_name=f"{name}/wildcard" if nested else name)
     return rc
 
 

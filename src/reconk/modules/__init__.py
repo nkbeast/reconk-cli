@@ -11,6 +11,7 @@ from reconk.modules import (  # noqa: F401
     horizontal,
     js,
     live,
+    merge,
     params,
     passive,
     ports,

@@ -36,8 +36,12 @@ class UrlHarvestModule(Module):
         sources_dir = self.ctx.out.cat(self.category) / "sources"
         subs_out = self.ctx.out.cat("subdomains") / "urls_harvested.txt"
 
+        # harvest from EVERY unique in-scope subdomain, not just the roots
+        input_path = self.ctx.out.cat(self.category) / "harvest_input.txt"
+        input_path.write_text("\n".join(sorted(domains)) + "\n", encoding="utf-8")
+
         args = [
-            "-dL", str(self.ctx.out.root / "scope.txt"),
+            "-dL", str(input_path),
             "-o", str(out_path),
             "--per-source", str(sources_dir),
             "--subs", str(subs_out),
@@ -71,17 +75,24 @@ class UrlHarvestModule(Module):
         res.files.append(str(path))
         res.count = len(merged)
 
-        # merge subdomains harvested from URLs into the subdomain pool
+        # merge subdomains harvested from URLs into the canonical pool so
+        # the later phases (js, tech, takeover) also see them
         url_subs = self.ctx.out.read("subdomains", "urls_harvested.txt")
         if url_subs:
             self.ctx.out.append("subdomains", "passive.txt", url_subs)
+            current = set(self.ctx.out.read("subdomains", "all_subdomains.txt"))
+            current.update(url_subs)
+            self.ctx.out.write("subdomains", "all_subdomains.txt", sorted(current), dedupe=True)
 
         self.done(f"{res.count} unique URLs")
         return res
 
     # ------------------------------------------------------------------ #
     def _domains_to_harvest(self) -> List[str]:
-        """Wildcard/mixed: root domains. Single: the exact scope hosts."""
+        """Wildcard/mixed: root domains + every merged unique subdomain.
+        Single: the exact scope hosts."""
         if self.ctx.scope.is_single:
             return self.ctx.scope.hosts_to_probe()
-        return self.ctx.scope.all_domains()
+        domains = set(self.ctx.scope.all_domains())
+        domains.update(self.ctx.out.read("subdomains", "all_subdomains.txt"))
+        return sorted(domains)

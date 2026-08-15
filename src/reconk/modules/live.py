@@ -1,15 +1,21 @@
 """Live host filtering with httpx.
 
+A host is considered LIVE when it answers the connection and any HTTP
+response comes back from it — NOT only status 200. 3xx/4xx/5xx hosts
+are alive too and stay in the pipeline (the status is kept per URL for
+triage).
+
 Takes the merged subdomain list (or the single-domain scope hosts) and
 probes them with httpx in plain text mode (no JSON):
 
-  * 03-live/alive.txt         — alive URLs (one per line)
+  * 03-live/alive.txt         — alive URLs (every responding host, any status)
   * 03-live/alive_details.txt — full httpx line (status, title, tech...)
   * 03-live/status_codes.txt  — raw status-code list for quick triage
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import List
 
 from reconk.modules.registry import ModuleResult, register
@@ -76,9 +82,12 @@ class LiveModule(Module):
 
         # ---- parse text output ------------------------------------------
         # format: url [status] [title] [length] [location] [ip:cname] [tech]...
+        # EVERY host that answered the connection is alive — no 200-only
+        # filtering. 3xx/4xx/5xx are kept and tagged with their status.
         details = self.ctx.out.read(self.category, "httpx_probe.txt")
         urls: List[str] = []
         status_counts: List[str] = []
+        status_dist: Counter = Counter()
         for line in details:
             parts = line.strip().split()
             if not parts:
@@ -97,6 +106,8 @@ class LiveModule(Module):
                     break
             urls.append(url)
             status_counts.append(f"{status} {url}" if status else url)
+            if status:
+                status_dist[status] += 1
 
         if urls:
             p1 = self.ctx.out.write(self.category, "alive.txt", urls, dedupe=True)
@@ -107,15 +118,20 @@ class LiveModule(Module):
             res.files.append(str(p3))
             res.count = len(urls)
 
-        self.done(f"{res.count} alive endpoints")
+        dist = ", ".join(f"{code}x:{n}" for code, n in sorted(status_dist.items()))
+        self.done(f"{res.count} alive endpoints (any status) — {dist}")
         return res
 
     # ------------------------------------------------------------------ #
     def _hosts_to_probe(self) -> List[str]:
-        """Wildcard mode: all discovered subdomains. Single mode: scope hosts."""
+        """Wildcard mode: the merged unique in-scope subdomains
+        (02-subdomains/all_subdomains.txt from the merge phase).
+        Single mode: the scope hosts themselves."""
         if self.ctx.scope.is_single or self.ctx.scope.is_network_only:
             return self.ctx.scope.hosts_to_probe()
-        hosts: List[str] = []
-        for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
-            hosts += self.ctx.out.read("subdomains", fname)
+        hosts: List[str] = self.ctx.out.read("subdomains", "all_subdomains.txt")
+        if not hosts:
+            # fallback: merge on the fly (e.g. --only live after a partial run)
+            for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
+                hosts += self.ctx.out.read("subdomains", fname)
         return sorted(set(hosts))
