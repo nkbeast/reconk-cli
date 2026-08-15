@@ -2,7 +2,9 @@
   <img src="assets/reconk-banner2.png" alt="Reconk — Bug Bounty Reconnaissance Orchestrator" width="300">
 </p>
 
-<h1 align="center">Reconk — Bug Bounty Reconnaissance Orchestrator</h1>
+<h1 align="center">RECONK</h1>
+<h1 align="center">Bug Bounty Reconnaissance Orchestrator</h1>
+
 
 <p align="center">
   <em>Recon isn't a phase. It's an obsession.</em>
