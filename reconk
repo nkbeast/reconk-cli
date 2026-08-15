@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Reconk CLI launcher — runs the interactive TUI without installation.
+
+Usage:
+  ./reconk               interactive menu
+  ./reconk scan <t> ...  classic subcommands
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_SRC = _PROJECT_ROOT / "src"
+
+# make the package importable regardless of the current directory
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+# let subprocess tools (python scripts) find the package too
+_pypath = os.environ.get("PYTHONPATH", "")
+if str(_SRC) not in _pypath.split(os.pathsep):
+    os.environ["PYTHONPATH"] = str(_SRC) + (os.pathsep + _pypath if _pypath else "")
+
+from reconk.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

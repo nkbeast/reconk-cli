@@ -1,0 +1,38 @@
+# ============================================================================
+# Reconk CLI — configuration
+# ============================================================================
+# User overrides can be placed in ~/.config/reconk/config.yaml (deep merged).
+
+output:
+  # Default base directory; a sub-directory per target name is created here.
+  base_dir: "~/Documents/bugbounty/reconk"
+
+tools:
+  # Resolver list for puredns bruteforce/resolve
+  resolvers: "/home/nk/Documents/bugbounty/reconkv3/src/resolvers.txt"
+
+  # DNS brute wordlists
+  subdomain_wordlist: "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+  permutation_wordlist: "/usr/share/seclists/Discovery/DNS/deepmagic.com-prefixes-top500.txt"
+
+  # subfinder provider config (API keys live here)
+  subfinder_config: "~/.config/subfinder/provider-config.yaml"
+
+api_keys:
+  # Optional API keys for extra harvesting sources (empty = disabled)
+  urlscan: ""
+  virustotal: ""
+  github_token: ""
+
+scan:
+  # naabu port selection: 100 | 1000 | full | comma list
+  naabu_top_ports: "1000"
+  # httpx concurrency
+  httpx_threads: "100"
+  # katana JS crawl depth
+  katana_depth: "3"
+  # brute wordlist size: small(5000) | medium(100k) | large(1M)
+  brute_size: "small"
+  # subfinder: query ALL sources (slow, rate-limited) or only the
+  # default high-quality set (fast). true | false
+  subfinder_all: "false"

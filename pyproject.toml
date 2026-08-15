@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconk-cli"
+version = "4.0.0"
+description = "Reconk CLI - advanced end-to-end bug bounty reconnaissance orchestration (network, DNS, subdomains, JS, parameters, URL harvesting, live filtering, tech fingerprinting)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "nkbeast" }]
+keywords = ["recon", "bugbounty", "osint", "subdomain", "pentest", "security"]
+dependencies = [
+    "rich>=13.0",
+    "PyYAML>=6.0",
+    "requests>=2.28",
+    "aiohttp>=3.9",
+    "dnspython>=2.6",
+    "mmh3>=4.0",
+    "questionary>=2.0",
+]
+
+[project.scripts]
+reconk = "reconk.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = [
+    "reconk",
+    "reconk.modules",
+    "reconk.scripts",
+]
+include-package-data = true
+
+[tool.setuptools.package-data]
+reconk = ["../config/*.yaml"]
