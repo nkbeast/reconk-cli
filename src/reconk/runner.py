@@ -8,12 +8,14 @@ Every command runs inside a rich Live panel that shows:
 While a *parallel* stage runs, all tools stream at once in a split-screen
 view — every command gets its own panel ("agent"). Press 1-9 to focus a
 panel directly, Tab / ↓ / → / n to cycle focus forward, ↑ / ← to cycle
-back, Home/End to jump to the first/last panel: the focused tool is
-enlarged and shows more of its stream, the others stay compact and keep
-updating. The mouse wheel scrolls the focused panel's stream back and
-forward. `q`/`Esc`/Ctrl-C quits the view AND cancels the whole pipeline —
-every running tool is killed (its whole process group, children
-included), so no background process keeps running afterwards.
+back, Home/End to jump to the first/last panel, or just click a panel
+with the mouse: the focused tool is enlarged and shows more of its
+stream, the others stay compact and keep updating. The mouse wheel
+scrolls the focused panel's stream back and forward. `q`/Ctrl-C quits
+the view AND cancels the whole pipeline — every running tool is killed
+(its whole process group, children included), so no background process
+keeps running afterwards. `Esc` only closes the view (plain status
+lines take over, the stage keeps running).
 
 Every command runs in its own process group; Ctrl-C propagates through
 the pipeline and stops all stages cleanly, killing every spawned tool.
@@ -127,6 +129,10 @@ class _KeyReader(threading.Thread):
             return
         try:
             tty.setcbreak(fd)
+            # drop any bytes left in the terminal buffer from before the
+            # view started (e.g. an ESC pressed during the plain-output
+            # gap between stages) — they must never replay as a quit
+            termios.tcflush(fd, termios.TCIFLUSH)
             # enable SGR mouse reporting (scroll wheel = buttons 64/65)
             if os.isatty(1):
                 try:
@@ -186,14 +192,21 @@ class _KeyReader(threading.Thread):
     def _mouse_token(data: bytes) -> str:
         if not data or data[-1:] not in (b"M", b"m"):
             return "ignore"
+        parts = data[:-1].split(b";")
+        if len(parts) < 3:
+            return "ignore"
         try:
-            btn = int(data[:-1].split(b";", 1)[0])
+            btn = int(parts[0])
+            row = int(parts[1])
+            col = int(parts[2])
         except ValueError:
             return "ignore"
         if btn == 64:
             return "scroll_up"
         if btn == 65:
             return "scroll_down"
+        if btn in (0, 1, 2, 3):  # left / middle / right press
+            return f"click:{row}:{col}"
         return "ignore"
 
     def _run_windows(self) -> None:
@@ -235,9 +248,12 @@ class ParallelView:
       ↑ / ←        cycle focus to the previous tool
       Home / End   jump to the first / last tool
       mouse wheel  scroll the focused tool's stream (↑ = older lines)
-      q / Esc / Ctrl-C  quit the view AND cancel the running stage — every
-                        tool of the stage is killed (process group), no
-                        background process keeps running afterwards
+      mouse click  focus the tool panel under the cursor (like Tab)
+      q / Ctrl-C   quit the view AND cancel the running stage — every
+                   tool of the stage is killed (process group), no
+                   background process keeps running afterwards
+      Esc          close the view only — the stage keeps running, plain
+                   status lines take over (a stray Esc must never cancel)
     """
 
     FOCUSED_LINES = 18
@@ -252,6 +268,7 @@ class ParallelView:
         self._streams: dict = {}
         self._order: list = []
         self._focus = 0
+        self._panel_rows: list = []  # (sid, start_row, end_row) click regions
         self._lock = threading.RLock()
         self._dirty = threading.Event()
         self._stop = threading.Event()
@@ -347,22 +364,36 @@ class ParallelView:
         )
         live.start()
         self._live = live
-        last_render = time.monotonic()
+        failures = 0
         try:
             while not self._stop.is_set():
-                now = time.monotonic()
-                if now - last_render < self.refresh:
-                    self._dirty.wait(self.refresh - (now - last_render))
-                    self._dirty.clear()
-                    continue
-                self._process_keys()
                 try:
+                    self._process_keys()
                     live.update(self._render())
+                    failures = 0
                 except Exception:  # noqa: BLE001
-                    pass
-                last_render = time.monotonic()
-            self._process_keys()
+                    # one bad frame must never kill the view; if the
+                    # render keeps failing, close the view gracefully so
+                    # plain status lines take over instead of a dead screen
+                    failures += 1
+                    if failures >= 5:
+                        self.active = False
+                        self._stop.set()
+                        break
+                # render FIRST, then wait: gating the render on the dirty
+                # flag starves it while lines stream in continuously (every
+                # wakeup reset the wait, so the view froze until all tools
+                # stopped producing output). The deadline keeps a bounded
+                # refresh cadence even under constant stream load.
+                deadline = time.monotonic() + self.refresh
+                while not self._stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._dirty.wait(remaining)
+                    self._dirty.clear()
             try:
+                self._process_keys()
                 live.update(self._render())
             except Exception:  # noqa: BLE001
                 pass
@@ -374,23 +405,49 @@ class ParallelView:
 
     def _process_keys(self) -> None:
         quit_view = False
-        with self._lock:
-            order = list(self._order)
-            focus = self._focus if self._focus < len(order) else 0
+        cancel_requested = False
         while True:
             try:
                 ch = self._keys.get_nowait()
             except queue.Empty:
                 break
-            if ch in ("q", "Q", "escape", "\x03"):
+            with self._lock:
+                order = list(self._order)
+            if ch in ("q", "Q", "\x03"):
+                quit_view = True
+                cancel_requested = True
+                break
+            if ch == "escape":
+                # close the view only — a stray Esc must never cancel a
+                # running stage
                 quit_view = True
                 break
-            if ch == "scroll_up" and order:
+            if ch.startswith("click:"):
+                try:
+                    row = int(ch.split(":")[1])
+                except (ValueError, IndexError):
+                    row = -1
+                if row > 0:
+                    with self._lock:
+                        regions = list(self._panel_rows)
+                    for sid, r0, r1 in regions:
+                        if r0 <= row <= r1:
+                            try:
+                                self._focus = self._order.index(sid)
+                            except ValueError:
+                                pass
+                            self._dirty.set()
+                            break
+            elif ch == "scroll_up" and order:
+                with self._lock:
+                    focus = self._focus if self._focus < len(order) else 0
                 s = self._streams.get(order[focus])
                 if s is not None:
                     s.scroll = min(s.scroll + 3, max(0, len(s.tail) - 1))
                 self._dirty.set()
             elif ch == "scroll_down" and order:
+                with self._lock:
+                    focus = self._focus if self._focus < len(order) else 0
                 s = self._streams.get(order[focus])
                 if s is not None:
                     s.scroll = max(0, s.scroll - 3)
@@ -426,10 +483,10 @@ class ParallelView:
                 self._key_thread.join(timeout=1)
                 self._key_thread = None
             # cancel the running stage — kill every tool (process groups)
-            # so nothing keeps running in the background after a quit;
+            # so nothing keeps running in the background after a q quit;
             # fire-and-forget: the kill waits must not block this render
             # thread (end_stage joins it with a timeout)
-            if self.on_quit is not None:
+            if cancel_requested and self.on_quit is not None:
                 threading.Thread(target=self.on_quit, daemon=True).start()
 
     # ------------------------------------------------------------------ #
@@ -440,6 +497,8 @@ class ParallelView:
             focus = self._focus if self._focus < len(streams) else 0
 
         if not streams:
+            with self._lock:
+                self._panel_rows = []
             return Panel(
                 Text("starting parallel tools…", style="dim"),
                 border_style="cyan",
@@ -455,7 +514,7 @@ class ParallelView:
             else:
                 header.append(f" {chip} ", style="dim")
         header.append(
-            "   [q] quit+cancel  [mouse wheel] scroll  [tab/↓/→] next  [↑/←] prev  [1-9] focus",
+            "   [q] quit+cancel  [esc] close view  [mouse] click=focus wheel=scroll  [tab/↓/→] next  [↑/←] prev  [1-9] focus",
             style="bold white",
         )
 
@@ -497,6 +556,30 @@ class ParallelView:
             else:
                 break
             panel = build()
+
+        # record the terminal row range of every panel so mouse clicks can
+        # focus the panel under the cursor (same layout as the final frame;
+        # row 1 is the outer panel's top border, content starts at row 2)
+        regions: list = []
+        y = 2
+        try:
+            y += len(self.console.render_lines(header))
+        except Exception:  # noqa: BLE001
+            pass
+        for i, s in enumerate(streams):
+            sub = self._stream_panel(
+                s,
+                focused=(i == focus),
+                tail_lines=focus_tail if i == focus else compact_tail,
+            )
+            try:
+                h = len(self.console.render_lines(sub))
+            except Exception:  # noqa: BLE001
+                h = 3
+            regions.append((order[i], y, min(total_h, y + h)))
+            y += h
+        with self._lock:
+            self._panel_rows = [r for r in regions if r[1] <= total_h]
         return panel
 
     def _stream_panel(self, s: _Stream, focused: bool, tail_lines: int) -> Panel:
@@ -755,6 +838,7 @@ class CommandRunner:
         key_stop = threading.Event()
         key_thread: Optional[_KeyReader] = None
         panel_closed = False
+        last_panel_render = time.monotonic()
         if live is not None:
             key_thread = _KeyReader(keys_q, key_stop)
             key_thread.start()
@@ -769,12 +853,19 @@ class CommandRunner:
                         raise CommandError(f"{display} (cancelled)", 130, log)
                     return subprocess.CompletedProcess(cmd, 130, "", "")
                 if key_thread is not None:
+                    cancel = False
                     while True:
                         try:
                             k = keys_q.get_nowait()
                         except queue.Empty:
                             break
-                        if k in ("q", "Q", "escape", "\x03"):
+                        if k in ("q", "Q", "\x03"):
+                            panel_closed = True
+                            cancel = True
+                            break
+                        if k == "escape":
+                            # close the panel only — the command keeps
+                            # running with plain lines below
                             panel_closed = True
                             break
                         if k == "scroll_up":
@@ -789,15 +880,20 @@ class CommandRunner:
                         key_stop.set()
                         key_thread.join(timeout=1)
                         key_thread = None
-                        self._cancel_event.set()
-                        self._kill_proc(proc)
+                        if cancel:
+                            self._cancel_event.set()
+                            self._kill_proc(proc)
+                            if not quiet:
+                                self.console.print(
+                                    "  [red]✗ {label}[/red] cancelled by user"
+                                )
+                            if check:
+                                raise CommandError(f"{display} (cancelled)", 130, log)
+                            return subprocess.CompletedProcess(cmd, 130, "", "")
                         if not quiet:
                             self.console.print(
-                                "  [red]✗ {label}[/red] cancelled by user"
+                                "  [dim]panel closed — output continues below[/dim]"
                             )
-                        if check:
-                            raise CommandError(f"{display} (cancelled)", 130, log)
-                        return subprocess.CompletedProcess(cmd, 130, "", "")
                 if timeout and time.monotonic() - started > timeout:
                     self._kill_proc(proc)
                     try:
@@ -826,7 +922,12 @@ class CommandRunner:
                 if view_on:
                     self.parallel_view.update(view_sid, line)
                 elif live:
-                    live.update(render("running..."))
+                    # throttle: a fast stream must not re-measure/render the
+                    # panel on every line (that lags the loop behind the
+                    # producer); redraw at the refresh cadence instead
+                    if time.monotonic() - last_panel_render >= REFRESH_SECONDS:
+                        live.update(render("running..."))
+                        last_panel_render = time.monotonic()
         except KeyboardInterrupt:
             kill_flag.set()
             self._kill_proc(proc)
@@ -882,6 +983,15 @@ class CommandRunner:
         status_printed = False
         if view_on:
             self.parallel_view.finish(view_sid, rc, elapsed)
+            if not self.parallel_view.active:
+                # view was closed early (Esc) — report the result as a
+                # plain line since no panel will show it
+                if not quiet:
+                    if rc == 0:
+                        self.console.print(f"  [green]✔ {label}[/green] completed in {elapsed:.1f}s")
+                    else:
+                        self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
+                status_printed = True
         elif not quiet and (live is not None or panel_closed):
             # full-screen panel was used — report the result as a plain line
             # (the alternate screen is already restored by the finally)
