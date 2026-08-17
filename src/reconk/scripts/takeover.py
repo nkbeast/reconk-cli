@@ -128,6 +128,13 @@ def follow_cname(host: str, depth: int = 5) -> List[str]:
 
 
 def is_nxdomain(host: str) -> bool:
+    """True only when the host definitively does NOT exist (NXDOMAIN).
+
+    Fail closed: transient DNS failures (timeouts, network errors) and
+    NoAnswer (name exists but has no A record — e.g. AAAA-only endpoints)
+    must NOT be treated as dead, or healthy targets become false-positive
+    takeovers.
+    """
     try:
         import dns.exception
         import dns.resolver
@@ -135,12 +142,18 @@ def is_nxdomain(host: str) -> bool:
         try:
             answers = dns.resolver.resolve(host, "A", lifetime=8)
             return not bool(answers)
-        except (dns.exception.DNSException, dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        except dns.resolver.NXDOMAIN:
             return True
+        except dns.resolver.NoAnswer:
+            return False
+        except dns.resolver.LifetimeTimeout:
+            return False
+        except dns.exception.DNSException:
+            return False
         except Exception:  # noqa: BLE001
             return False
     except Exception:  # noqa: BLE001
-        return True
+        return False
 
 
 def log(msg: str) -> None:

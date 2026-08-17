@@ -222,6 +222,15 @@ def main() -> int:
     do_records = not args.axfr_only and not args.no_records
     do_axfr = True
 
+    # truncate the output file — this suite only ever appends, so a
+    # resume/re-run would otherwise double every record
+    try:
+        with open(args.output, "w", encoding="utf-8"):
+            pass
+    except OSError as e:
+        print(f"cannot write output {args.output}: {e}", file=sys.stderr)
+        return 1
+
     t0 = time.monotonic()
     log(f"[*] DNS recon on {len(domains)} domain(s) — records={do_records} axfr={do_axfr}")
     for d in domains:

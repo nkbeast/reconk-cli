@@ -1886,6 +1886,10 @@ DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/124.0.0.0 Safari/537.36")
 
+#: cap on a single response body — fingerprinting only needs headers,
+#: a scan of early bytes, and the page text; a bigger read is a memory risk
+MAX_BODY_BYTES = 50 * 1024 * 1024
+
 DEFAULT_HEADERS = {
     "User-Agent": DEFAULT_UA,
     "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -2261,7 +2265,20 @@ class TechFingerprint:
                         allow_redirects=allow_redirects, proxy=self.proxy,
                     ) as resp:
                         try:
-                            body = await resp.read() if read else b""
+                            if read:
+                                # bound the body read — a hostile/misbehaving
+                                # target must not be able to push a multi-GB
+                                # response into memory
+                                cap = MAX_BODY_BYTES
+                                length = resp.content_length
+                                if length is not None and length > cap:
+                                    body = await resp.content.read(cap)
+                                else:
+                                    body = await resp.content.read(cap + 1)
+                                    if len(body) > cap:
+                                        body = body[:cap]
+                            else:
+                                body = b""
                         except aiohttp.ClientPayloadError:
                             # Server sent a Content-Encoding aiohttp/brotli
                             # couldn't decode (e.g. br without the brotli
@@ -2327,7 +2344,7 @@ class TechFingerprint:
 
     # ----------------- rate limiting -------------------------------------
     async def _throttle(self) -> None:
-        if not self.rate_limit:
+        if not self.rate_limit or self.rate_limit <= 0:
             return
         async with self._rate_lock:
             now = time.monotonic()
@@ -2431,7 +2448,9 @@ class TechFingerprint:
             meta=r.meta_tags,
             html=st.get("text", ""),
             scripts=st.get("scripts", ""),
-            url=f"{r.final_url}\n{host_of(r.final_url or r.target)}",
+            # single line, no hostname suffix: "$"-anchored URL regexes
+            # (e.g. \.php(?:$|\?)) must be able to match the URL end
+            url=f"{r.final_url or r.target}",
             dns={},
         )
         dets = self.engine.detect(ev)
@@ -2516,7 +2535,9 @@ class TechFingerprint:
             ctx.verify_mode = ssl.CERT_NONE
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, 443, ssl=ctx, server_hostname=host),
-                timeout=self.timeout_total)
+                # a blackholed host must not hang the whole scan — never
+                # probe TLS without a bound timeout
+                timeout=self.timeout_total or 10)
             try:
                 ssl_obj = writer.get_extra_info("ssl_object")
                 der = ssl_obj.getpeercert(binary_form=True) if ssl_obj else None
@@ -2943,6 +2964,10 @@ async def async_main(opts: argparse.Namespace) -> int:
         print("[!] No targets specified. Use -t or -l.", file=sys.stderr)
         return 2
 
+    # normalize + dedupe — "example.com" and "example.com/" are the same
+    # host and must not be scanned twice (rate limits, duplicate stats)
+    targets = list(dict.fromkeys(normalise_target(t) for t in targets))
+
     fast = opts.fast
     if not opts.quiet:
         print(_c(f"[*] TechFingerprint v{__version__} - {len(targets)} target(s), "
@@ -2985,7 +3010,8 @@ async def async_main(opts: argparse.Namespace) -> int:
 
     out_dir = opts.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # UTC stamp so the filename agrees with the report's UTC timestamps
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     writers = [("json", write_json), ("html", write_html),
                ("csv", write_csv), ("txt", write_txt)]
     for ext, fn in writers:

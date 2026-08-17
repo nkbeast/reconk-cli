@@ -82,6 +82,9 @@ SOURCE_SEM_LIMITS: dict[str, int] = {
     "wayback": 2, "commoncrawl": 3,
 }
 
+#: hard cap on URLs collected per source — keeps memory bounded on huge domains
+MAX_URLS_PER_SOURCE = 250_000
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Structures
@@ -110,9 +113,13 @@ def normalize_url(url: str) -> str:
         url = url.strip()
         if not url:
             return ""
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
         p = urlparse(url)
+        # case-insensitive scheme check + protocol-relative support; the
+        # scheme is lowercased by urlparse, so an uppercase "HTTP://" host
+        # is preserved while a missing/unknown scheme gets https://
+        if p.scheme.lower() not in ("http", "https"):
+            url = "https://" + url.lstrip("/")
+            p = urlparse(url)
         scheme = p.scheme.lower()
         netloc = (p.hostname or "").lower()
         if p.port and not ((p.port == 80 and scheme == "http") or (p.port == 443 and scheme == "https")):
@@ -185,11 +192,13 @@ async def _fetch_raw(
     as_json: bool = False,
     as_bytes: bool = False,
     allow_status: tuple = (200,),
-) -> Optional[Any]:
+) -> tuple[Optional[int], Optional[Any]]:
     """
-    Core fetch. Returns str (text), dict/list (json), or bytes.
-    Reads the full body INSIDE the response context to avoid ClientResponseError.
-    Returns None on any error / non-2xx status.
+    Core fetch. Returns (status, data) — status is the HTTP status when a
+    response was received (even for non-allowed statuses), None when the
+    request never got a response (network error/timeout). Data is str
+    (text), dict/list (json), or bytes. Reads the full body INSIDE the
+    response context to avoid ClientResponseError.
     """
     hdrs = {"User-Agent": random.choice(USER_AGENTS), "Accept-Encoding": "gzip, deflate"}
     if headers:
@@ -204,28 +213,28 @@ async def _fetch_raw(
             proxy=PROXY,
         ) as resp:
             if resp.status not in allow_status:
-                return None
+                return resp.status, None
             if as_json:
                 try:
-                    return await resp.json(content_type=None)
+                    return resp.status, await resp.json(content_type=None)
                 except Exception:
                     raw = await resp.text(errors="replace")
                     try:
-                        return json.loads(raw)
+                        return resp.status, json.loads(raw)
                     except Exception:
-                        return None
+                        return resp.status, None
             elif as_bytes:
-                return await resp.read()
+                return resp.status, await resp.read()
             else:
-                return await resp.text(errors="replace")
+                return resp.status, await resp.text(errors="replace")
     except asyncio.TimeoutError:
-        return None
+        return None, None
     except aiohttp.ClientResponseError:
-        return None
+        return None, None
     except aiohttp.ClientError:
-        return None
+        return None, None
     except Exception:
-        return None
+        return None, None
 
 
 async def fetch_text(
@@ -239,11 +248,11 @@ async def fetch_text(
     sem_ctx = sem or asyncio.Semaphore(999)
     async with sem_ctx:
         for attempt in range(max_retries):
-            result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
-                                       allow_status=allow_status)
-            if result is not None:
+            status, result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
+                                               allow_status=allow_status)
+            if status is not None:
+                # a response was received — good or wrong status, never retry
                 return result
-            # Only retry on genuine transient failures (network), not 4xx
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
         return None
@@ -260,9 +269,9 @@ async def fetch_json(
     sem_ctx = sem or asyncio.Semaphore(999)
     async with sem_ctx:
         for attempt in range(max_retries):
-            result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
-                                       as_json=True, allow_status=allow_status)
-            if result is not None:
+            status, result = await _fetch_raw(session, url, headers=headers, timeout=timeout,
+                                               as_json=True, allow_status=allow_status)
+            if status is not None:
                 return result
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
@@ -274,16 +283,17 @@ async def fetch_json(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaphore,
-                         max_retries: int = 2) -> list[str]:
+                         max_retries: int = 2) -> tuple[list[str], list[str]]:
     """Wayback Machine CDX API — optimized for speed with rate-limit resilience."""
     url = (
         f"https://web.archive.org/cdx/search/cdx"
         f"?url=*.{domain}/*&output=text&collapse=urlkey"
-        f"&fl=original&filter=statuscode:200&limit=5000000"
+        f"&fl=original&filter=statuscode:200&limit={MAX_URLS_PER_SOURCE}"
     )
+    errors: list[str] = []
+    urls: list[str] = []
     async with sem:
         for attempt in range(max_retries):
-            urls: list[str] = []
             ua = random.choice(USER_AGENTS)
             try:
                 async with session.get(
@@ -300,11 +310,19 @@ async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaph
                     proxy=PROXY,
                 ) as resp:
                     if resp.status == 200:
-                        async for raw_line in resp.content:
-                            line = raw_line.decode("utf-8", errors="replace").strip()
-                            if line and line.startswith("http"):
-                                urls.append(line)
-                        return urls
+                        # resp.content yields raw chunks (up to 64 KB) with no
+                        # line guarantees — buffer + split so records that
+                        # straddle chunk boundaries are never corrupted
+                        buf = b""
+                        async for chunk in resp.content.iter_any():
+                            buf += chunk
+                            lines = buf.split(b"\n")
+                            buf = lines.pop()
+                            for raw in lines:
+                                line = raw.decode("utf-8", errors="replace").strip()
+                                if line.startswith("http") and len(urls) < MAX_URLS_PER_SOURCE:
+                                    urls.append(line)
+                        return urls, errors
                     elif resp.status in (429, 503):
                         console.print(f"  [dim]⚠ Wayback: HTTP {resp.status} (rate limited)"
                                       f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
@@ -312,39 +330,48 @@ async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaph
                             await asyncio.sleep(5 + random.uniform(0, 3))
                         continue
                     elif resp.status in (403, 404):
-                        console.print(f"  [dim]⚠ Wayback: HTTP {resp.status} — blocked or no data[/dim]")
-                        return urls
+                        errors.append(f"wayback: HTTP {resp.status} — blocked or no data")
+                        return urls, errors
                     else:
-                        console.print(f"  [dim]⚠ Wayback: HTTP {resp.status}[/dim]")
-                        return urls
+                        errors.append(f"wayback: HTTP {resp.status}")
+                        return urls, errors
             except asyncio.TimeoutError:
                 console.print(f"  [dim]⚠ Wayback: timeout"
                               f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
+                if attempt == max_retries - 1:
+                    errors.append("wayback: timeout")
             except (aiohttp.ClientError, OSError) as e:
                 console.print(f"  [dim]⚠ Wayback: {type(e).__name__}"
                               f"{' retrying...' if attempt+1 < max_retries else ''}[/dim]")
+                if attempt == max_retries - 1:
+                    errors.append(f"wayback: {type(e).__name__}")
             except Exception as e:
-                console.print(f"  [dim]⚠ Wayback: {type(e).__name__}[/dim]")
-                return urls
+                errors.append(f"wayback: {type(e).__name__}")
+                return urls, errors
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-        return []
+        if not urls and not errors:
+            errors.append("wayback: retries exhausted without a usable response")
+        return urls, errors
 
 
-async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Semaphore) -> list[str]:
+async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Semaphore) -> tuple[list[str], list[str]]:
     """Common Crawl — 2 most recent indexes with fast fail."""
     urls: set[str] = set()
+    errors: list[str] = []
     index_data = await fetch_json(
         session, "https://index.commoncrawl.org/collinfo.json",
         sem=sem, timeout=15,
     )
     if not index_data:
-        return []
+        errors.append("commoncrawl: could not fetch collinfo.json")
+        return [], errors
 
     # Only use 2 most recent indexes — they overlap heavily
     indexes = [item["cdx-api"] for item in index_data[:2] if "cdx-api" in item]
     if not indexes:
-        return []
+        errors.append("commoncrawl: no cdx-api in collinfo")
+        return [], errors
 
     async def _query(api_url: str):
         ua = random.choice(USER_AGENTS)
@@ -361,20 +388,28 @@ async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Se
                 proxy=PROXY,
             ) as resp:
                 if resp.status != 200:
+                    errors.append(f"commoncrawl: HTTP {resp.status}")
                     return
-                raw = await resp.text(errors="replace")
-                for line in raw.strip().splitlines():
-                    try:
-                        u = json.loads(line).get("url", "")
-                        if u:
-                            urls.add(u)
-                    except (json.JSONDecodeError, KeyError):
-                        continue
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-            pass  # fail silently — not critical
+                # streamed, line-aware (JSON lines may straddle chunks)
+                buf = b""
+                async for chunk in resp.content.iter_any():
+                    buf += chunk
+                    lines = buf.split(b"\n")
+                    buf = lines.pop()
+                    for line in lines:
+                        if len(urls) >= MAX_URLS_PER_SOURCE:
+                            return
+                        try:
+                            u = json.loads(line).get("url", "")
+                            if u:
+                                urls.add(u)
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            errors.append(f"commoncrawl: {type(e).__name__}")
 
     await asyncio.gather(*[_query(api) for api in indexes])
-    return list(urls)
+    return list(urls), errors
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,7 +446,12 @@ async def process_domain(domain: str, args: argparse.Namespace, session: ClientS
         async def _run(i: int, coro, name: str):
             try:
                 r = await coro
-                gathered[i] = r or []
+                if isinstance(r, tuple):
+                    gathered[i], errs = r
+                    if errs:
+                        result.errors.extend(errs)
+                else:
+                    gathered[i] = r or []
             except Exception as e:
                 result.errors.append(f"{name}: {type(e).__name__}: {e}")
                 gathered[i] = []

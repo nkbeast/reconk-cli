@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import socket
+from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Set
 
 import dns.exception
@@ -33,7 +34,9 @@ def read_lines(path: str) -> List[str]:
 
 
 def append_line(path: str, line: str) -> None:
-    with open(path, "a", encoding="utf-8", errors="replace") as fh:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8", errors="replace") as fh:
         fh.write(line.rstrip() + "\n")
 
 
@@ -94,12 +97,8 @@ def is_nxdomain(hostname: str) -> bool:
     except dns.resolver.NXDOMAIN:
         return True
     except Exception:  # noqa: BLE001
+        # transient DNS failure — fail closed, do not call it dead
         return False
-    try:
-        socket.gethostbyname(hostname)
-        return False
-    except socket.gaierror:
-        return True
 
 
 def cname_chain(hostname: str, limit: int = 6) -> List[str]:
@@ -134,7 +133,9 @@ def parse_scope_entries(lines: Iterable[str]) -> Iterator[tuple]:
     import ipaddress
     import re as _re
 
-    asn_re = _re.compile(r"^(?:AS)?(\d{1,10})$", _re.IGNORECASE)
+    # ASNs must carry the AS prefix — a bare number is far more likely an
+    # org name than a typo'd ASN
+    asn_re = _re.compile(r"^AS(\d{1,10})$", _re.IGNORECASE)
     for raw in lines:
         raw = raw.strip()
         if not raw or raw.startswith("#"):
@@ -155,7 +156,7 @@ def parse_scope_entries(lines: Iterable[str]) -> Iterator[tuple]:
             except ValueError:
                 yield ("org", raw)
         elif asn_re.match(line):
-            m = asn_re.match(line)
+            m = asn_re.fullmatch(line)
             if m and 1 <= int(m.group(1)) <= 4294967295:
                 yield ("asn", f"AS{m.group(1)}")
         elif "." in line:

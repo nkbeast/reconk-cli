@@ -200,8 +200,10 @@ def fping_sweep(targets: List[str]) -> Set[str]:
             for line in proc.stdout.splitlines():
                 if line.strip():
                     alive.add(line.strip().split()[0])
-        except Exception:  # noqa: BLE001
-            break
+        except Exception as e:  # noqa: BLE001
+            # log and continue — a chunk failure must not silently drop
+            # every remaining chunk from the sweep
+            log(f"{WARN} fping chunk {i // CHUNK} failed: {e} — continuing")
     return alive
 
 
@@ -242,8 +244,12 @@ def tcp_discover(targets: List[str], limit: int = 8000) -> Set[str]:
 # --------------------------------------------------------------------------- #
 def ptr_for_ip(ip: str) -> str:
     try:
-        answers = resolve(socket.gethostbyaddr(ip)[0], "A")  # noqa: F841
-        return socket.gethostbyaddr(ip)[0].rstrip(".")
+        name = socket.gethostbyaddr(ip)[0].rstrip(".")
+        # confirm the PTR name actually resolves forward — otherwise the
+        # hostname is stale/typo-squatted and not worth keeping
+        if resolve(name, "A"):
+            return name
+        return ""
     except Exception:  # noqa: BLE001
         try:
             import dns.reversename
@@ -405,7 +411,7 @@ def main() -> int:
         prefixes = asn_to_prefixes(asn, whois_bin)
         if prefixes:
             log(f"{TAG} {asn} -> {len(prefixes)} prefixes")
-            for p in prefixes[:10]:
+            for p in prefixes:
                 append_line(args.output, f"PREFIX|{asn}|{p}")
             cidrs.update(prefixes)
         else:
@@ -420,7 +426,7 @@ def main() -> int:
         if alive:
             log(f"{OK} fping: {len(alive):,} alive")
         else:
-            alive = tcp_discover(targets)
+            alive = tcp_discover(targets, limit=args.max_ips)
             log(f"{OK} tcp-discover: {len(alive):,} alive")
     else:
         alive = tcp_discover(targets, limit=args.max_ips)
@@ -475,6 +481,10 @@ def main() -> int:
         with open(args.prefixes, "w", encoding="utf-8") as fh:
             fh.write("\n".join(sorted(cidrs)) + "\n")
         log(f"{OK} {len(cidrs)} prefixes -> {args.prefixes}")
+    try:
+        session.close()
+    except Exception:  # noqa: BLE001
+        pass
 
     log(f"{OK} horizontal recon done in {time.monotonic() - t0:.1f}s")
     return 0
