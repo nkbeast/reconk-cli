@@ -28,7 +28,7 @@ class TechFingerprintModule(Module):
 
     def run(self) -> ModuleResult:
         alive = self.ctx.out.read("live", "alive.txt")
-        if not alive and self.ctx.round_no == 1:
+        if not alive and self.ctx.round_no == 1 and self.ctx.stage_has("live"):
             # single scope: live filtering runs in the SAME parallel stage —
             # wait for it to write alive.txt before fingerprinting
             self.console.print("  [dim]· waiting for live filter output…[/dim]")
@@ -68,6 +68,7 @@ class TechFingerprintModule(Module):
             lines = [l for l in lines if l.strip()]
             path = self.ctx.out.write(self.category, "tech.txt", lines, dedupe=False)
             res.files.append(str(path))
+            res.files.append(str(report))
             res.count = len(lines)
 
         self.done(f"{res.count} fingerprint lines")

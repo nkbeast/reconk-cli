@@ -111,7 +111,7 @@ class PortScanModule(Module):
 
     # ------------------------------------------------------------------ #
     def _resolve_hosts(self, hosts: Set[str], limit: int = 5000) -> List[str]:
-        """Resolve A records via a thread pool. Fallbacks to socket."""
+        """Resolve A records via a thread pool. Falls back to sockets."""
         ips: Set[str] = set()
         try:
             self.runner.require("dnsx")
@@ -120,9 +120,20 @@ class PortScanModule(Module):
         else:
             dnsx = True
 
+        hosts_list = list(hosts)[:limit]
+
+        def _socket_resolve(host: str) -> None:
+            try:
+                for info in socket.getaddrinfo(host, None):
+                    ip = str(info[4][0])
+                    if self._valid_ip(ip):
+                        ips.add(ip)
+            except Exception:  # noqa: BLE001
+                pass
+
         if dnsx:
             hosts_file = self.ctx.out.root / "resolve_hosts.txt"
-            hosts_file.write_text("\n".join(sorted(hosts)) + "\n", encoding="utf-8")
+            hosts_file.write_text("\n".join(sorted(hosts_list)) + "\n", encoding="utf-8")
             try:
                 out = self.runner.run(
                     ["dnsx", "-l", str(hosts_file), "-a", "-resp-only", "-silent"],
@@ -134,18 +145,15 @@ class PortScanModule(Module):
                     ip = line.strip()
                     if self._valid_ip(ip):
                         ips.add(ip)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                # dnsx crashed/timed out — fall back to socket resolution
+                # instead of silently dropping every IP
+                self.console.print(f"  [yellow]⚠ dnsx failed ({e}) — falling back to socket resolution[/yellow]")
+                with ThreadPoolExecutor(max_workers=64) as pool:
+                    list(pool.map(_socket_resolve, hosts_list))
         else:
             with ThreadPoolExecutor(max_workers=64) as pool:
-                for host in list(hosts)[:limit]:
-                    try:
-                        for info in pool.submit(socket.getaddrinfo, host, None).result():
-                            ip = str(info[4][0])
-                            if self._valid_ip(ip):
-                                ips.add(ip)
-                    except Exception:  # noqa: BLE001
-                        continue
+                list(pool.map(_socket_resolve, hosts_list))
         return sorted(ips)
 
     # ------------------------------------------------------------------ #

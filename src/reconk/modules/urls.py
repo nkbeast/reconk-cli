@@ -41,8 +41,14 @@ class UrlHarvestModule(Module):
         input_path = self.ctx.out.cat(self.category) / "harvest_input.txt"
         input_path.write_text("\n".join(sorted(domains)) + "\n", encoding="utf-8")
 
-        # SpiderCrawl stages per-domain buckets under its -o dir
+        # SpiderCrawl stages per-domain buckets under its -o dir — wipe any
+        # leftovers from a previous run so a failed crawl can never be
+        # re-assembled as fresh data
+        import shutil
+
         staging = self.ctx.out.cat(self.category) / "spidercrawl"
+        if staging.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
         args = [
             "-l", str(input_path),
             "-o", str(staging),
@@ -60,6 +66,13 @@ class UrlHarvestModule(Module):
             self.console.print(f"  [yellow]⚠ harvester: {e}[/yellow]")
             res.ok = False
             res.message = str(e)
+
+        if not res.ok:
+            # never assemble (or fold into the subdomain pool) leftover
+            # buckets from a previous run — a failed harvest must not
+            # present stale URLs as fresh data
+            self.done(f"harvest failed: {res.message}")
+            return res
 
         # assemble the canonical outputs from the per-domain buckets
         merged = self._merge_bucket(staging / "urls")
@@ -83,10 +96,12 @@ class UrlHarvestModule(Module):
         # skip it — urls runs in the same parallel stage as ports (which
         # reads these files) and nothing downstream consumes them anyway.
         if url_subs and not self.ctx.scope.is_single:
-            self.ctx.out.append("subdomains", "passive.txt", url_subs)
+            passive_path = self.ctx.out.append("subdomains", "passive.txt", url_subs)
+            res.files.append(str(passive_path))
             current = set(self.ctx.out.read("subdomains", "all_subdomains.txt"))
             current.update(url_subs)
-            self.ctx.out.write("subdomains", "all_subdomains.txt", sorted(current), dedupe=True)
+            subs_pool_path = self.ctx.out.write("subdomains", "all_subdomains.txt", sorted(current), dedupe=True)
+            res.files.append(str(subs_pool_path))
 
         self.done(f"{res.count} unique URLs — {len(url_subs)} hosts from URLs")
         return res

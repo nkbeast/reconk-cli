@@ -60,6 +60,9 @@ class HorizontalEnumModule(Module):
             res.files.append(str(path))
             res.count = len(hosts)
 
+        if out_path.exists():
+            res.files.append(str(out_path))
+
         prefixes = self.ctx.out.read("ports", "prefixes.txt")
         if prefixes:
             res.files.append(str(self.ctx.out.write("ports", "prefixes.txt", prefixes, dedupe=True)))

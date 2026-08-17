@@ -55,9 +55,14 @@ class MergeSubdomainsModule(Module):
         res.count = len(all_subs)
 
         resolved = self._resolve(all_subs)
+        # drop a stale resolved_subdomains.txt when nothing resolves now —
+        # the ports phase would otherwise consume the previous run's hosts
+        stale = self.ctx.out.cat(self.category) / "resolved_subdomains.txt"
         if resolved:
             rpath = self.ctx.out.write(self.category, "resolved_subdomains.txt", resolved, dedupe=True)
             res.files.append(str(rpath))
+        elif stale.exists():
+            stale.unlink()
 
         self.done(f"{res.count} unique subdomains (in scope) — {len(resolved)} resolve")
         return res

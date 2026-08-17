@@ -37,7 +37,10 @@ class DnsReconModule(Module):
             )
             if out_path.exists():
                 res.files.append(str(out_path))
-                res.count = len(self.ctx.out.read(self.category, "dns.txt"))
+                # count only actual record lines (TYPE|host|value), not the
+                # "== domain ==" headers
+                lines = self.ctx.out.read(self.category, "dns.txt")
+                res.count = sum(1 for l in lines if "|" in l)
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ dnsrecon: {e}[/yellow]")
             res.ok = False

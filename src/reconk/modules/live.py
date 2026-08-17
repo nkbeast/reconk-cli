@@ -145,9 +145,14 @@ class LiveModule(Module):
     def _hosts_to_probe(self) -> List[str]:
         """Wildcard mode: the merged unique in-scope subdomains
         (02-subdomains/all_subdomains.txt from the merge phase).
-        Single mode: the scope hosts themselves."""
-        if self.ctx.scope.is_single or self.ctx.scope.is_network_only:
+        Single mode: the scope hosts themselves.
+        Network mode: the IPs/hosts found by the horizontal phase
+        (02-subdomains/horizontal.txt) — hosts_to_probe() returns [] there."""
+        if self.ctx.scope.is_single:
             return self.ctx.scope.hosts_to_probe()
+        if self.ctx.scope.is_network_only:
+            hosts: List[str] = self.ctx.out.read("subdomains", "horizontal.txt")
+            return sorted(set(hosts))
         hosts: List[str] = self.ctx.out.read("subdomains", "all_subdomains.txt")
         if not hosts:
             # fallback: merge on the fly (e.g. --only live after a partial run)

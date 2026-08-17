@@ -97,6 +97,8 @@ class VerticalEnumModule(Module):
                     res.files.append(str(out_file))
             except Exception as e:  # noqa: BLE001
                 self.console.print(f"  [yellow]⚠ recursive subfinder: {e}[/yellow]")
+                res.ok = False
+                res.message = str(e)
         elif sf_cfg:
             self.console.print(f"  [yellow]⚠ subfinder config not found: {sf_cfg} — skipping recursive scan[/yellow]")
 
@@ -139,18 +141,20 @@ class VerticalEnumModule(Module):
                      "static", "status", "support", "uat", "web", "ws", "www2", "jenkins"]
 
         candidates: Set[str] = set()
-        prefixes: Set[str] = set()
 
         for sub in subs:
-            if not any(sub.endswith("." + d) for d in roots):
+            root = next((d for d in roots if sub.endswith("." + d)), None)
+            if not root:
+                continue
+            first = sub.split(".")[0]
+            if first in ("www",):
                 continue
             for w in words:
                 for pat in self.MUTATIONS:
-                    candidates.add(pat.format(prefix=sub, label=w))
-                # extract word-ish prefix from the subdomain itself
-                first = sub.split(".")[0]
-                if first and first not in ("www",):
-                    prefixes.add(first)
+                    # apply the mutation to the left-most LABEL only, then
+                    # re-append the root — substituting the full subdomain
+                    # produced malformed hosts like "dev.example.com-api"
+                    candidates.add(f"{pat.format(prefix=first, label=w)}.{root}")
 
         # label<->label combinations (dev-api, api-dev, ...)
         labels = [w for w in words if len(w) <= 10][:60]

@@ -99,3 +99,5 @@ class ParamsModule(Module):
             pass
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ gf: {e}[/yellow]")
+            res.ok = False
+            res.message = str(e)
