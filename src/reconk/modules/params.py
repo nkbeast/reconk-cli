@@ -99,7 +99,7 @@ class ParamsModule(Module):
         try:
             proc = self.runner.run(
                 ["gf", "-list"],
-                name="gf_list", check=False, timeout=30, quiet=True,
+                name="gf_list", check=False, quiet=True,
             )
             avail = {ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()}
         except Exception:  # noqa: BLE001
@@ -128,7 +128,7 @@ class ParamsModule(Module):
                     proc = self.runner.run(
                         ["gf", pattern, tmp],
                         name=f"gf_{pattern}",
-                        check=False, timeout=600, quiet=True,
+                        check=False, quiet=True,
                     )
                     hits = []
                     for line in (proc.stdout or "").splitlines():

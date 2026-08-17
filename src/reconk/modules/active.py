@@ -60,7 +60,6 @@ class ActiveEnumModule(Module):
                     "-q",
                 ],
                 name="puredns_bruteforce",
-                timeout=7200,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ puredns bruteforce: {e}[/yellow]")

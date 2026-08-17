@@ -33,7 +33,6 @@ class DnsReconModule(Module):
                 self.script("dnsrecon.py"),
                 ["-l", str(self.scope_domains_file()), "-o", str(out_path)],
                 name="dnsrecon",
-                timeout=7200,
             )
             if out_path.exists():
                 res.files.append(str(out_path))

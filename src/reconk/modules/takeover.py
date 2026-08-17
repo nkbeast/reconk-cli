@@ -43,7 +43,6 @@ class TakeoverModule(Module):
                 self.script("takeover.py"),
                 ["-l", str(hosts_file), "-o", str(out_path), "--threads", "50"],
                 name="takeover_check",
-                timeout=3600,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ takeover check: {e}[/yellow]")

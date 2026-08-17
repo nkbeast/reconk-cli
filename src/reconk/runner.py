@@ -355,16 +355,24 @@ class ParallelView:
         # buffer, so it always fills the whole terminal from the top — an
         # inline Live would start below previously printed output and its
         # top would scroll off-screen as the panel grows
-        live = Live(
-            self._render(),
-            console=self.console,
-            refresh_per_second=int(1 / self.refresh),
-            transient=True,
-            vertical_overflow="ellipsis",
-        )
-        live.start()
+        try:
+            live = Live(
+                self._render(),
+                console=self.console,
+                refresh_per_second=int(1 / self.refresh),
+                transient=True,
+                screen=True,
+                vertical_overflow="ellipsis",
+            )
+            live.start()
+        except Exception:  # noqa: BLE001
+            # never leave a silent dead view: fall back to plain lines
+            self.active = False
+            self._stop.set()
+            return
         self._live = live
         failures = 0
+        fell_back = False
         try:
             while not self._stop.is_set():
                 try:
@@ -377,6 +385,7 @@ class ParallelView:
                     # plain status lines take over instead of a dead screen
                     failures += 1
                     if failures >= 5:
+                        fell_back = True
                         self.active = False
                         self._stop.set()
                         break
@@ -400,6 +409,13 @@ class ParallelView:
         finally:
             try:
                 live.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if fell_back:
+            try:
+                self.console.print(
+                    "\n[yellow]⚠ live view error — continuing with plain output[/yellow]"
+                )
             except Exception:  # noqa: BLE001
                 pass
 

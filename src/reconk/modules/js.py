@@ -189,7 +189,6 @@ class JsAnalysisModule(Module):
             self.runner.run(
                 args,
                 name="katana_js",
-                timeout=3600,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ katana: {e}[/yellow]")

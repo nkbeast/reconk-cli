@@ -47,7 +47,6 @@ class HorizontalEnumModule(Module):
                     "--prefixes", str(prefixes_path),
                 ],
                 name="asn_recon",
-                timeout=7200,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ asn_recon: {e}[/yellow]")

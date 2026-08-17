@@ -62,7 +62,6 @@ class VerticalEnumModule(Module):
             self.runner.run(
                 ["puredns", "resolve", str(cand_file), "-r", str(resolvers), "-w", str(out_file), "-q"],
                 name="puredns_resolve_permutations",
-                timeout=3600,
             )
             if out_file.exists():
                 resolved = [l.strip() for l in out_file.read_text(errors="replace").splitlines() if l.strip()]
@@ -90,7 +89,6 @@ class VerticalEnumModule(Module):
                         "-o", str(out_file),
                     ],
                     name="subfinder_recursive",
-                    timeout=3600,
                 )
                 if out_file.exists():
                     recursive = [l.strip() for l in out_file.read_text(errors="replace").splitlines() if l.strip()]

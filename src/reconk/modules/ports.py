@@ -61,7 +61,6 @@ class PortScanModule(Module):
                     "-o", str(out_path),
                 ],
                 name="naabu",
-                timeout=7200,
                 quiet=True,
             )
         except Exception as e:  # noqa: BLE001
@@ -138,7 +137,6 @@ class PortScanModule(Module):
                 out = self.runner.run(
                     ["dnsx", "-l", str(hosts_file), "-a", "-resp-only", "-silent"],
                     name="dnsx_resolve",
-                    timeout=900,
                     quiet=True,
                 )
                 for line in (out.stdout or "").splitlines():

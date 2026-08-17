@@ -58,7 +58,7 @@ class PassiveEnumModule(Module):
                 cmd += ["-config", str(cfg_path)]
 
         try:
-            self.runner.run(cmd, name="subfinder", timeout=1800)
+            self.runner.run(cmd, name="subfinder")
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ subfinder: {e}[/yellow]")
             res.ok = False

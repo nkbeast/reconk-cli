@@ -97,7 +97,6 @@ class MergeSubdomainsModule(Module):
             out = self.runner.run(
                 ["dnsx", "-l", str(hosts_file), "-silent"],
                 name="dnsx_merge_resolve",
-                timeout=900,
                 quiet=True,
             )
             return sorted(l.strip() for l in out.stdout.splitlines() if l.strip())

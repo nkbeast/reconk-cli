@@ -83,7 +83,6 @@ class LiveModule(Module):
                     "-o", str(detail_path),
                 ],
                 name="httpx_probe",
-                timeout=3600,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ httpx probe: {e}[/yellow]")

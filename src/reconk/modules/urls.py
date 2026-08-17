@@ -60,7 +60,6 @@ class UrlHarvestModule(Module):
                 args,
                 name="spidercrawl",
                 title="SpiderCrawl URL harvesting",
-                timeout=7200,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ harvester: {e}[/yellow]")

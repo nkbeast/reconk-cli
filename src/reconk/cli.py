@@ -42,6 +42,7 @@ def _run_pipeline(
     base_dir: Optional[str] = None,
     verbose: bool = False,
     target_name: Optional[str] = None,
+    resume: Optional[bool] = None,
 ) -> int:
     # mixed scope: run the single workflow first, then the wildcard
     # workflow, into <target>/single and <target>/wildcard (collapsed tree)
@@ -93,7 +94,8 @@ def _run_pipeline(
 
     log_dir = out.root / "logs" if str(cfg.get("output.save_tool_logs", "false")).lower() == "true" else None
     runner = CommandRunner(console, log_dir=log_dir, verbose=verbose)
-    pipeline = Pipeline(cfg, scope, out, runner, console, skip=skip, only=only)
+    pipeline = Pipeline(cfg, scope, out, runner, console, skip=skip, only=only,
+                        interactive=bool(console.is_terminal), resume=resume)
 
     t0 = time.monotonic()
     try:
@@ -140,7 +142,8 @@ def _cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     if getattr(args, "subfinder_all", False):
         cfg._data.setdefault("scan", {})["subfinder_all"] = "true"
     return _run_pipeline(
-        cfg, scope, skip=skip, base_dir=args.out, verbose=args.verbose
+        cfg, scope, skip=skip, base_dir=args.out, verbose=args.verbose,
+        resume=True if args.resume else None,
     )
 
 
@@ -165,7 +168,8 @@ def _cmd_resume(args: argparse.Namespace, cfg: Config) -> int:
     if scope.is_empty:
         console.print(f"[red]! scope.txt for '{args.target}' is empty — nothing to resume[/red]")
         return 2
-    return _run_pipeline(cfg, scope, skip=args.skip, only=args.only, base_dir=str(base))
+    return _run_pipeline(cfg, scope, skip=args.skip, only=args.only,
+                         base_dir=str(base), resume=False)
 
 
 def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
@@ -286,7 +290,7 @@ def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
 #: phases that actually run per scope mode (subdomain enumeration and
 #: takeover only exist in the wildcard workflow, etc.)
 PHASES_SINGLE = ["dns", "live", "ports", "urls", "params", "js", "tech"]
-PHASES_NETWORK = ["horizontal", "ports", "live"]
+PHASES_NETWORK = ["ports", "live"]
 
 
 def _phases_for_mode(mode: str) -> List[str]:
@@ -367,11 +371,11 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
     plan_files = (
         "  WORKFLOW (stages — phases in [] run in parallel):\n"
         "  single   : [dns + live + ports + tech + urls] -> [params + js]\n"
-        "  wildcard : [dns + passive + horizontal] -> [active] -> [vertical]\n"
+        "  wildcard : [dns + passive] -> [active] -> [vertical]\n"
         "             -> [merge #1] -> [live #1] -> [urls]\n"
         "             -> [merge #2] -> [live #2]\n"
         "             -> [js + tech + params] -> [ports + takeover]\n"
-        "  network  : horizontal -> ports -> live\n"
+        "  network  : ports -> live\n"
         "  mixed    : single workflow first (-> <target>/single), then\n"
         "             wildcard workflow (-> <target>/wildcard)\n"
         "\n"
@@ -379,8 +383,7 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
         f"  passive    <- {root}/scope.txt            (subfinder -dL)\n"
         f"  active     <- {root}/scope.txt            (puredns bruteforce -d)\n"
         f"  vertical   <- {root}/scope.txt            (puredns + permutations)\n"
-        f"  horizontal <- {root}/scope.txt            (scripts/asn.py --scope)\n"
-        f"  merge      <- passive+active+vertical+horizontal.txt\n"
+        f"  merge      <- passive+active+vertical.txt\n"
         f"                -> all_subdomains.txt + resolved_subdomains.txt\n"
         f"  live       <- {root}/probe_hosts.txt      (httpx -l, all_subdomains)\n"
         f"  ports      <- {root}/04-ports/scan_targets.txt  (naabu -list, resolved IPs)\n"
@@ -619,6 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--skip", default=None, help="comma-separated phases to skip: " + ", ".join(MODULE_LABELS))
     ps.add_argument("--no-takeover", action="store_true", help="skip the takeover phase")
     ps.add_argument("--subfinder-all", action="store_true", help="query ALL subfinder sources (slow, rate-limited)")
+    ps.add_argument("--resume", action="store_true", help="skip phases completed in a previous run of this target (progress file)")
     ps.add_argument("--verbose", action="store_true", help="verbose output")
     ps.set_defaults(handler=_cmd_scan)
 

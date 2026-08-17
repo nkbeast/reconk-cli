@@ -55,7 +55,6 @@ class TechFingerprintModule(Module):
                 self.script("tech.py"),
                 ["-l", str(hosts_file), "-o", str(cat_dir), "--txt", "-c", "30"],
                 name="tech_fingerprint",
-                timeout=7200,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ tech_fingerprint: {e}[/yellow]")
