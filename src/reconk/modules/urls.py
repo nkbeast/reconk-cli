@@ -6,18 +6,21 @@ tool (async, speed-optimized URL harvester):
   * wayback machine CDX   (streamed, huge, rate-limit resilient)
   * common crawl          (2 most recent indexes, fast fail)
 
-It runs against every unique in-scope host (roots + merged subdomains),
+It runs against every host from the httpx live result only (alive.txt),
 staging per-domain buckets, which this module assembles into the reconk
 layout:
 
-  * 05-urls/all_urls.txt            — every unique in-scope URL
+  * 05-urls/all_urls.txt            — every unique harvested URL
   * 02-subdomains/urls_harvested.txt — hostnames observed in URLs
-  * 02-subdomains/passive.txt       — in-scope URL hosts added to the pool
+
+The harvested hostnames are folded back into the subdomain pool by the
+second merge phase (merge #2), never directly here.
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Set
+from urllib.parse import urlparse
 
 from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
@@ -30,14 +33,14 @@ class UrlHarvestModule(Module):
     category = "urls"
 
     def run(self) -> ModuleResult:
-        domains = self._domains_to_harvest()
+        domains = self._hosts_to_harvest()
         if not domains:
-            return ModuleResult(self.name, message="no domains in scope")
+            return ModuleResult(self.name, message="no live hosts to harvest")
 
-        self.start(f"URL harvesting — {len(domains)} domain(s)")
+        self.start(f"URL harvesting — {len(domains)} live host(s)")
         res = ModuleResult(self.name)
 
-        # harvest from EVERY unique in-scope subdomain, not just the roots
+        # harvest from the httpx live result only — never the raw pool
         input_path = self.ctx.out.cat(self.category) / "harvest_input.txt"
         input_path.write_text("\n".join(sorted(domains)) + "\n", encoding="utf-8")
 
@@ -90,30 +93,24 @@ class UrlHarvestModule(Module):
             subs_path = self.ctx.out.write("subdomains", "urls_harvested.txt", url_subs, dedupe=True)
             res.files.append(str(subs_path))
 
-        # merge subdomains harvested from URLs into the canonical pool so
-        # the later phases (js, tech, takeover) also see them. Single mode:
-        # skip it — urls runs in the same parallel stage as ports (which
-        # reads these files) and nothing downstream consumes them anyway.
-        if url_subs and not self.ctx.scope.is_single:
-            passive_path = self.ctx.out.append("subdomains", "passive.txt", url_subs)
-            res.files.append(str(passive_path))
-            current = set(self.ctx.out.read("subdomains", "all_subdomains.txt"))
-            current.update(url_subs)
-            subs_pool_path = self.ctx.out.write("subdomains", "all_subdomains.txt", sorted(current), dedupe=True)
-            res.files.append(str(subs_pool_path))
-
         self.done(f"{res.count} unique URLs — {len(url_subs)} hosts from URLs")
         return res
 
     # ------------------------------------------------------------------ #
-    def _domains_to_harvest(self) -> List[str]:
-        """Wildcard/mixed: root domains + every merged unique subdomain.
-        Single: the exact scope hosts."""
-        if self.ctx.scope.is_single:
-            return self.ctx.scope.hosts_to_probe()
-        domains = set(self.ctx.scope.all_domains())
-        domains.update(self.ctx.out.read("subdomains", "all_subdomains.txt"))
-        return sorted(domains)
+    def _hosts_to_harvest(self) -> List[str]:
+        """Every host in the httpx live result (alive.txt), URL -> host."""
+        hosts: Set[str] = set()
+        for entry in self.ctx.out.read("live", "alive.txt"):
+            e = entry.strip()
+            if not e:
+                continue
+            if e.startswith("http"):
+                host = urlparse(e).hostname
+            else:
+                host = e.split("/", 1)[0].split(":", 1)[0]
+            if host:
+                hosts.add(host.lower().rstrip("."))
+        return sorted(hosts)
 
     # ------------------------------------------------------------------ #
     def _merge_bucket(self, bucket_dir) -> List[str]:

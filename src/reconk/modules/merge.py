@@ -1,20 +1,22 @@
 """Subdomain merge — the single canonical unique subdomain list.
 
-Consumes every subdomain source produced so far:
+Consumes the subdomain sources produced so far:
 
-  * passive.txt      (subfinder)
-  * active.txt       (puredns bruteforce)
-  * vertical.txt     (permutations + recursive)
-  * horizontal.txt   (ASN / CT / PTR / cert SANs)
-  * urls_harvested.txt (hostnames observed in harvested URLs)
+  * passive.txt       (subfinder)
+  * active.txt        (puredns bruteforce)
+  * vertical.txt      (permutations + recursive)
+  * urls_harvested.txt (hostnames observed in harvested URLs — merge #2
+    only; merge #1 must never see them, and the URL harvest itself only
+    runs on the merge #1 live result)
 
 and writes:
 
-  * 02-subdomains/all_subdomains.txt     — unique, in-scope, sorted
-  * 02-subdomains/resolved_subdomains.txt — the subset that resolves (dnsx)
+  * 02-subdomains/all_subdomains.txt      — unique, in-scope, sorted
+  * 02-subdomains/resolved_merge1.txt     — merge #1's resolved subset
+  * 02-subdomains/resolved_subdomains.txt — merge #2's resolved subset
 
-Everything downstream (live, ports, urls, js, tech, takeover) consumes
-this one file — nothing re-merges the sources on its own.
+Everything downstream consumes these files (ports takes the merge #1
+resolved list, takeover/live take all_subdomains + alive.txt).
 
 In-scope filtering: only entries that belong to a scope root domain
 (entry == root or entry.endswith("." + root)) survive. Wildcard patterns,
@@ -29,7 +31,7 @@ from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
 from reconk.runner import ToolNotFound
 
-SOURCES = ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt", "urls_harvested.txt")
+SOURCES = ("passive.txt", "active.txt", "vertical.txt")
 
 
 @register
@@ -42,6 +44,9 @@ class MergeSubdomainsModule(Module):
         raw: Set[str] = set()
         for fname in SOURCES:
             raw.update(self.ctx.out.read(self.category, fname))
+        if self.ctx.round_no > 1:
+            # merge #2 folds the SpiderCrawl hostnames back into the pool
+            raw.update(self.ctx.out.read(self.category, "urls_harvested.txt"))
 
         all_subs = self._filter_in_scope(raw)
         if not all_subs:
@@ -55,14 +60,17 @@ class MergeSubdomainsModule(Module):
         res.count = len(all_subs)
 
         resolved = self._resolve(all_subs)
-        # drop a stale resolved_subdomains.txt when nothing resolves now —
-        # the ports phase would otherwise consume the previous run's hosts
-        stale = self.ctx.out.cat(self.category) / "resolved_subdomains.txt"
+        # drop stale resolution files when nothing resolves now — the
+        # ports phase would otherwise consume the previous run's hosts
         if resolved:
-            rpath = self.ctx.out.write(self.category, "resolved_subdomains.txt", resolved, dedupe=True)
+            rname = "resolved_merge1.txt" if self.ctx.round_no == 1 else "resolved_subdomains.txt"
+            rpath = self.ctx.out.write(self.category, rname, resolved, dedupe=True)
             res.files.append(str(rpath))
-        elif stale.exists():
-            stale.unlink()
+        else:
+            for stale in ("resolved_merge1.txt", "resolved_subdomains.txt"):
+                p = self.ctx.out.cat(self.category) / stale
+                if p.exists():
+                    p.unlink()
 
         self.done(f"{res.count} unique subdomains (in scope) — {len(resolved)} resolve")
         return res

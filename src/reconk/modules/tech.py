@@ -27,13 +27,10 @@ class TechFingerprintModule(Module):
     category = "tech"
 
     def run(self) -> ModuleResult:
+        # the live phase always runs before tech (stage order in every
+        # pipeline); alive.txt is the live result — final live pass in
+        # wildcard mode, the single pass in single mode
         alive = self.ctx.out.read("live", "alive.txt")
-        if not alive and self.ctx.round_no == 1 and self.ctx.stage_has("live"):
-            # single scope: live filtering runs in the SAME parallel stage —
-            # wait for it to write alive.txt before fingerprinting
-            self.console.print("  [dim]· waiting for live filter output…[/dim]")
-            self.wait_for_file(self.ctx.out.cat("live") / "alive.txt", timeout=900)
-            alive = self.ctx.out.read("live", "alive.txt")
         if not alive:
             return ModuleResult(self.name, message="no alive endpoints yet")
 

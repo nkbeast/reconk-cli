@@ -4,14 +4,15 @@ Executes the recon phases in dependency order as *stages*. A stage is a
 group of phases: a single-phase stage runs alone, a multi-phase stage
 runs all its phases in parallel threads.
 
-  single   : [dns + live + ports + tech + urls] -> [params + js]
-             (no subdomain enum, no takeover)
-  wildcard : [dns + passive] -> [active]
-             -> [vertical] -> [merge #1] -> [live #1]
-             -> [urls] -> [merge #2] -> [live #2]
-             -> [js + tech + params] -> [ports + takeover]
-             (merge #2 folds the URL-harvested subdomains back into the
-             pool so the second live pass + all scans see the new hosts)
+  single   : [dns + live + ports] -> [tech + urls] -> [params + js]
+             (no subdomain enum, no takeover; tech and SpiderCrawl both
+             take the httpx live result, params takes the harvested URLs)
+  wildcard : [dns + passive] -> [active] -> [vertical]
+             -> [merge #1] -> [live #1] -> [urls] (SpiderCrawl on the
+             live #1 result) -> [merge #2] (merge #1 + URL-harvested
+             hosts) -> [live #2] -> [js + tech + params]
+             -> [ports + takeover] (ports on the merge #1 pool, takeover
+             on the live #2 result)
   network  : ports -> live
   mixed    : the single workflow runs first, then the wildcard workflow,
              into <target>/single and <target>/wildcard (collapsed tree)
@@ -50,7 +51,8 @@ from reconk.scope import Scope
 
 #: full pipeline as ordered stages (parallel groups)
 SINGLE_STAGES = [
-    ["dns", "live", "ports", "tech", "urls"],
+    ["dns", "live", "ports"],
+    ["tech", "urls"],
     ["params", "js"],
 ]
 

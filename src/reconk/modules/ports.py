@@ -92,8 +92,11 @@ class PortScanModule(Module):
         # legacy name used by older runs
         targets.update(self.ctx.out.read(self.category, "scope_cidrs.txt"))
 
-        # subdomain IPs: use the merge phase's canonical lists when present
-        subdomain_hosts: Set[str] = set(self.ctx.out.read("subdomains", "resolved_subdomains.txt"))
+        # subdomain IPs: the merge #1 resolved pool ONLY — hosts found via
+        # URL harvesting must never be port-scanned (no ownership data)
+        subdomain_hosts: Set[str] = set(self.ctx.out.read("subdomains", "resolved_merge1.txt"))
+        if not subdomain_hosts:
+            subdomain_hosts = set(self.ctx.out.read("subdomains", "resolved_subdomains.txt"))
         if not subdomain_hosts:
             for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
                 subdomain_hosts.update(self.ctx.out.read("subdomains", fname))

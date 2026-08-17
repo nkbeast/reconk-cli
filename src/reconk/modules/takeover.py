@@ -1,15 +1,16 @@
 """Subdomain takeover detection via the bundled native ``scripts/takeover.py``.
 
-For every discovered subdomain the script follows the CNAME chain with
-dnspython and flags hosts whose CNAME target is a known cloud provider
-AND does not resolve (classic dangling-DNS signal).
+For every host of the httpx live result (alive.txt) the script follows
+the CNAME chain with dnspython and flags hosts whose CNAME target is a
+known cloud provider AND does not resolve (classic dangling-DNS signal).
 
 Output: 09-takeover/takeover.txt
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Set
+from urllib.parse import urlparse
 
 from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
@@ -22,14 +23,25 @@ class TakeoverModule(Module):
     category = "takeover"
 
     def run(self) -> ModuleResult:
-        subs: List[str] = self.ctx.out.read("subdomains", "all_subdomains.txt")
+        # takeover checks the live hosts only (merge #2 live result in
+        # wildcard mode, the live result in single mode)
+        hosts: Set[str] = set()
+        for entry in self.ctx.out.read("live", "alive.txt"):
+            e = entry.strip()
+            if not e:
+                continue
+            if e.startswith("http"):
+                host = urlparse(e).hostname
+            else:
+                host = e.split("/", 1)[0].split(":", 1)[0]
+            if host:
+                hosts.add(host.lower().rstrip("."))
+        if not hosts:
+            # fallback: the merged pool (e.g. --only takeover on a partial run)
+            hosts.update(self.ctx.out.read("subdomains", "all_subdomains.txt"))
+        subs = sorted(hosts)
         if not subs:
-            # fallback: merge on the fly (e.g. --only takeover after a partial run)
-            for fname in ("passive.txt", "active.txt", "vertical.txt", "horizontal.txt"):
-                subs += self.ctx.out.read("subdomains", fname)
-        subs = sorted(set(subs))
-        if not subs:
-            return ModuleResult(self.name, message="no subdomains yet")
+            return ModuleResult(self.name, message="no live hosts yet")
 
         self.start(f"Takeover check — {len(subs)} subdomains")
         res = ModuleResult(self.name)
