@@ -6,6 +6,9 @@
 output:
   # Default base directory; a sub-directory per target name is created here.
   base_dir: "~/Documents/bugbounty/reconk"
+  # Save per-tool command logs into <target>/logs/*.log (can use a lot of
+  # disk). false = only the run manifest stays in logs/.
+  save_tool_logs: "false"
 
 tools:
   # Resolver list for puredns bruteforce/resolve. If this file does not
