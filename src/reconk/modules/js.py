@@ -208,20 +208,52 @@ class JsAnalysisModule(Module):
     # scope helpers
     # ------------------------------------------------------------------ #
     def _scope_regex(self) -> str:
-        """Regex for katana -cs: match URLs under scope domains (+wildcards).
+        """Regex for katana -cs: match URLs inside the engagement scope.
 
-        ``example.com`` (exact) and ``*.example.com`` (wildcard) are both
-        covered by the optional subdomain prefix, so one alternation entry
-        per base domain is enough.
+        Covers every scope flavour:
+          * exact domains  (``example.com``) + subdomains
+          * wildcards      (``*.example.com``) — one entry per base domain,
+            the optional subdomain prefix handles both
+          * IPs            (``1.2.3.4``)
+          * CIDRs          (``10.0.0.0/16``) — exact per-prefix ranges
+
+        Returns ``""`` when the scope has no host entries (katana then uses
+        its own default scope instead of an allow-list that matches nothing).
         """
         scope = self.ctx.scope
-        bases = set(scope.domains) | set(scope.wildcards)
-        if not bases:
+        entries = [re.escape(b) for b in sorted(set(scope.domains) | set(scope.wildcards))]
+        entries.extend(re.escape(ip) for ip in sorted(scope.ips))
+        entries.extend(self._cidr_regex(c) for c in sorted(scope.cidrs))
+        if not entries:
             return ""
         pattern = r"https?://(?:[a-z0-9.-]+\.)?(?:"
-        pattern += "|".join(re.escape(b) for b in sorted(bases))
+        pattern += "|".join(entries)
         pattern += r")(?::\d+)?(?:/|$)"
         return pattern
+
+    @staticmethod
+    def _cidr_regex(cidr: str) -> str:
+        """Exact-ish regex for a CIDR block's host addresses.
+
+        Full octets are fixed; the octet containing the prefix boundary is
+        enumerated to the exact allowed byte values (mask math, stride for
+        the bit remainder); trailing octets take any valid byte.
+        """
+        host, prefix_s = cidr.split("/")
+        prefix = int(prefix_s)
+        octets = [int(o) for o in host.split(".")]
+        fixed = prefix // 8
+        rem = prefix % 8
+        byte = r"(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])"
+        parts = [str(o) for o in octets[:fixed]]
+        if rem:
+            stride = 1 << (8 - rem)
+            lo = octets[fixed] & (0xFF << (8 - rem))
+            parts.append("(?:%s)" % "|".join(
+                str(v) for v in range(lo, lo + stride)))
+            fixed += 1
+        parts.extend(byte for _ in range(fixed, 4))
+        return "\\.".join(parts)
 
     # ------------------------------------------------------------------ #
     # 2. collect js urls
