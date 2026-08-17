@@ -120,8 +120,15 @@ def normalize_url(url: str) -> str:
         path = p.path or "/"
         query = ""
         if p.query:
-            params = sorted(parse_qs(p.query, keep_blank_values=True).items())
-            query = urlencode(params, doseq=True)
+            params = parse_qs(p.query, keep_blank_values=True)
+            # repair HTML-entity debris: "?amp%3Bfilter=x" was "?&amp;filter=x"
+            # in the source page — normalize it to the real "&filter=x" so the
+            # same URL found in both forms collapses to one entry
+            for k, v in list(params.items()):
+                if k.startswith("amp;") and len(k) > 4:
+                    params.setdefault(k[4:], []).extend(v)
+                    del params[k]
+            query = urlencode(sorted((k, sorted(v)) for k, v in params.items()), doseq=True)
         return urlunparse((scheme, netloc, path, p.params, query, ""))
     except Exception:
         return url.strip()
@@ -146,7 +153,13 @@ def get_extension(url: str) -> str:
 def extract_param_keys(url: str) -> list[str]:
     try:
         qs = urlparse(url).query
-        return list(parse_qs(qs).keys()) if qs else []
+        if not qs:
+            return []
+        keys = list(parse_qs(qs, keep_blank_values=True).keys())
+        # ';' is a path-param separator, never a valid query key — keys like
+        # "amp;filter" are HTML-entity debris ("?&amp;filter=") captured raw
+        # by wayback and must not pollute the parameter list
+        return [k for k in keys if ";" not in k and "&" not in k]
     except Exception:
         return []
 
