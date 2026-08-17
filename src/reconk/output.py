@@ -22,6 +22,7 @@ Creates a per-target directory layout:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Dict, List
@@ -95,7 +96,12 @@ class OutputTree:
         if dedupe:
             seen: Dict[str, None] = {}
             items = [x for x in items if not (x in seen or seen.__setitem__(x, None))]
-        path.write_text("\n".join(items) + ("\n" if items else ""), encoding="utf-8")
+        # atomic write: temp file + rename, so a parallel sibling waiting
+        # on this file's existence (wait_for_file) never reads a partially
+        # written file
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("\n".join(items) + ("\n" if items else ""), encoding="utf-8")
+        os.replace(tmp, path)
         self.files.setdefault(category, [])
         if str(path) not in self.files[category]:
             self.files[category].append(str(path))

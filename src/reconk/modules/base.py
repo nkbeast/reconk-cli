@@ -35,12 +35,18 @@ class RunContext:
     extra: dict = field(default_factory=dict)
     #: occurrence counter of this phase in the plan (1 = first run)
     round_no: int = 1
+    #: names of the modules running in the current parallel stage
+    stage_modules: set = field(default_factory=set)
 
     def module_file(self, module: str, category: str, filename: str) -> Path:
         return self.out.cat(category) / filename
 
     def is_skipped(self, module: str) -> bool:
         return module in self.skip
+
+    def stage_has(self, module: str) -> bool:
+        """True when `module` runs in the same stage as this one."""
+        return module in self.stage_modules
 
 
 class Module:

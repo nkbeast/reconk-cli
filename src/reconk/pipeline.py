@@ -165,14 +165,14 @@ class Pipeline:
             self.runner.parallel_mode = parallel
             if parallel:
                 with ThreadPoolExecutor(max_workers=len(group), thread_name_prefix="reconk") as pool:
-                    futs = {pool.submit(self._run_phase, name, counts[name] + 1): name for name in group}
+                    futs = {pool.submit(self._run_phase, name, counts[name] + 1, group): name for name in group}
                     for fut in futs:
                         result = fut.result()
                         counts[result.name] += 1
                         self.results.append(result)
             else:
                 name = group[0]
-                result = self._run_phase(name, counts[name] + 1)
+                result = self._run_phase(name, counts[name] + 1, group)
                 counts[result.name] += 1
                 self.results.append(result)
         self.runner.parallel_mode = False
@@ -182,9 +182,10 @@ class Pipeline:
         return self.results
 
     # ------------------------------------------------------------------ #
-    def _run_phase(self, name: str, round_no: int) -> ModuleResult:
+    def _run_phase(self, name: str, round_no: int, stage_group: List[str]) -> ModuleResult:
         ctx = self.ctx()
         ctx.round_no = round_no
+        ctx.stage_modules = set(stage_group)
         mod = None
         for cls in REGISTRY:
             if cls.name == name:
