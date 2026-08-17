@@ -136,7 +136,9 @@ def normalize_url(url: str) -> str:
 def is_valid_url(url: str) -> bool:
     try:
         p = urlparse(url.strip())
-        return p.scheme in ("http", "https") and bool(p.netloc) and len(url) < 2048
+        # generous cap: URLs with many parameters must be saved in full, not
+        # dropped (only pathological >16k lines are rejected)
+        return p.scheme in ("http", "https") and bool(p.netloc) and len(url) < 16384
     except Exception:
         return False
 
