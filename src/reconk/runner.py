@@ -10,8 +10,13 @@ view — every command gets its own panel ("agent"). Press 1-9 to focus a
 panel directly, Tab / ↓ / → / n to cycle focus forward, ↑ / ← to cycle
 back, Home/End to jump to the first/last panel: the focused tool is
 enlarged and shows more of its stream, the others stay compact and keep
-updating. `q`/`Esc` quits the view for the current stage and falls back
-to plain status lines.
+updating. The mouse wheel scrolls the focused panel's stream back and
+forward. `q`/`Esc`/Ctrl-C quits the view AND cancels the whole pipeline —
+every running tool is killed (its whole process group, children
+included), so no background process keeps running afterwards.
+
+Every command runs in its own process group; Ctrl-C propagates through
+the pipeline and stops all stages cleanly, killing every spawned tool.
 
 All output is also captured to per-phase log files when a ``log_dir`` is
 configured (default: off — see ``output.save_tool_logs``). The same class
@@ -24,16 +29,16 @@ import os
 import queue
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from rich.console import Console, Group
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -68,6 +73,7 @@ class _Stream:
         self.label = label
         self.quiet = quiet
         self.tail: deque = deque(maxlen=TAIL_WINDOW)
+        self.scroll = 0  # lines scrolled back with the mouse wheel
         self.done = False
         self.ok = True
         self.elapsed = 0.0
@@ -121,6 +127,12 @@ class _KeyReader(threading.Thread):
             return
         try:
             tty.setcbreak(fd)
+            # enable SGR mouse reporting (scroll wheel = buttons 64/65)
+            if os.isatty(1):
+                try:
+                    os.write(1, b"\x1b[?1000h\x1b[?1006h")
+                except OSError:
+                    pass
             while not self.stop.is_set():
                 b = self._read(fd, 0.1)
                 if not b:
@@ -129,6 +141,11 @@ class _KeyReader(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
         finally:
+            if os.isatty(1):
+                try:
+                    os.write(1, b"\x1b[?1000l\x1b[?1006l")
+                except OSError:
+                    pass
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
             except Exception:  # noqa: BLE001
@@ -144,6 +161,16 @@ class _KeyReader(threading.Thread):
             first = self._read(fd, 0.05)
             if first is None:
                 return "escape"
+            if first == b"<":  # SGR mouse event: ESC [ < b ; r ; c M
+                data = b""
+                for _ in range(16):
+                    b2 = self._read(fd, 0.05)
+                    if b2 is None:
+                        break
+                    data += b2
+                    if b2 in (b"M", b"m"):
+                        break
+                return self._mouse_token(data)
             ch = first.decode("utf-8", errors="replace")
             if ch in _CSI_ARROWS:
                 return _CSI_ARROWS[ch]
@@ -154,6 +181,20 @@ class _KeyReader(threading.Thread):
             self._read(fd, 0.05)
             return "ignore"
         return "escape"  # Alt+key etc.
+
+    @staticmethod
+    def _mouse_token(data: bytes) -> str:
+        if not data or data[-1:] not in (b"M", b"m"):
+            return "ignore"
+        try:
+            btn = int(data[:-1].split(b";", 1)[0])
+        except ValueError:
+            return "ignore"
+        if btn == 64:
+            return "scroll_up"
+        if btn == 65:
+            return "scroll_down"
+        return "ignore"
 
     def _run_windows(self) -> None:
         try:
@@ -193,10 +234,12 @@ class ParallelView:
       Tab / ↓ / →  cycle focus to the next tool
       ↑ / ←        cycle focus to the previous tool
       Home / End   jump to the first / last tool
-      q / Esc / Ctrl-C  quit the view for this stage (plain lines take over)
+      mouse wheel  scroll the focused tool's stream (↑ = older lines)
+      q / Esc / Ctrl-C  quit the view AND cancel the running stage — every
+                        tool of the stage is killed (process group), no
+                        background process keeps running afterwards
     """
 
-    FOCUSED_RATIO = 3
     FOCUSED_LINES = 18
     COMPACT_LINES = 4
 
@@ -205,6 +248,7 @@ class ParallelView:
         self.refresh = refresh
         self.enabled = bool(console.is_terminal)
         self.active = False
+        self.on_quit: Optional[Callable[[], None]] = None
         self._streams: dict = {}
         self._order: list = []
         self._focus = 0
@@ -330,6 +374,9 @@ class ParallelView:
 
     def _process_keys(self) -> None:
         quit_view = False
+        with self._lock:
+            order = list(self._order)
+            focus = self._focus if self._focus < len(order) else 0
         while True:
             try:
                 ch = self._keys.get_nowait()
@@ -338,7 +385,17 @@ class ParallelView:
             if ch in ("q", "Q", "escape", "\x03"):
                 quit_view = True
                 break
-            if ch.isdigit():
+            if ch == "scroll_up" and order:
+                s = self._streams.get(order[focus])
+                if s is not None:
+                    s.scroll = min(s.scroll + 3, max(0, len(s.tail) - 1))
+                self._dirty.set()
+            elif ch == "scroll_down" and order:
+                s = self._streams.get(order[focus])
+                if s is not None:
+                    s.scroll = max(0, s.scroll - 3)
+                self._dirty.set()
+            elif ch.isdigit():
                 idx = int(ch) - 1
                 if 0 <= idx < len(self._order):
                     self._focus = idx
@@ -368,6 +425,12 @@ class ParallelView:
             if self._key_thread is not None:
                 self._key_thread.join(timeout=1)
                 self._key_thread = None
+            # cancel the running stage — kill every tool (process groups)
+            # so nothing keeps running in the background after a quit;
+            # fire-and-forget: the kill waits must not block this render
+            # thread (end_stage joins it with a timeout)
+            if self.on_quit is not None:
+                threading.Thread(target=self.on_quit, daemon=True).start()
 
     # ------------------------------------------------------------------ #
     def _render(self) -> Panel:
@@ -392,7 +455,7 @@ class ParallelView:
             else:
                 header.append(f" {chip} ", style="dim")
         header.append(
-            "   [q] quit view  [tab/↓/→] next  [↑/←] prev  [home/end] first/last  [1-9] focus",
+            "   [q] quit+cancel  [mouse wheel] scroll  [tab/↓/→] next  [↑/←] prev  [1-9] focus",
             style="bold white",
         )
 
@@ -444,11 +507,15 @@ class ParallelView:
             head = Spinner("dots", text=f" {s.title}  {time.monotonic() - s.started:5.1f}s", style="cyan")
         body: list = [head, Text("")]
         style = "bright_black" if focused else "grey37"
-        for l in list(s.tail)[-tail_lines:]:
+        lines = list(s.tail)
+        end = len(lines) - s.scroll
+        start = max(0, end - tail_lines)
+        for l in lines[start:end]:
             body.append(Text(l, style=style))
+        scrolled = f"  [dim]↕ scrolled {s.scroll}[/dim]" if s.scroll else ""
         return Panel(
             Group(*body),
-            title=f"[{'bold cyan' if focused else 'dim'}]{s.label}[/{'bold cyan' if focused else 'dim'}]",
+            title=f"[{'bold cyan' if focused else 'dim'}]{s.label}[/{'bold cyan' if focused else 'dim'}]{scrolled}",
             border_style="cyan" if focused else "grey37",
             padding=(0, 1),
         )
@@ -466,6 +533,54 @@ class CommandRunner:
         self.verbose = verbose
         self.parallel_view = ParallelView(console)
         self._parallel_mode = False
+        self._cancel_event = threading.Event()
+        self._procs: set = set()
+        self._procs_lock = threading.Lock()
+        self.parallel_view.on_quit = self.cancel
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        """Set when the user quits/cancels — the pipeline stops at the end
+        of the current stage and every running tool is killed."""
+        return self._cancel_event
+
+    def cancel(self) -> None:
+        """Stop everything: flag the pipeline, kill all running tools."""
+        self._cancel_event.set()
+        self.shutdown()
+
+    def _kill_proc(self, proc: "subprocess.Popen") -> None:
+        """Kill a command AND its whole process group (children included),
+        so nothing is left running in the background after a cancel."""
+        pid = proc.pid
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            pgid = None
+        if pgid is not None and pgid != os.getpgrp():
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+        else:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def shutdown(self) -> None:
+        """Kill every command this runner started (process groups)."""
+        with self._procs_lock:
+            procs = list(self._procs)
+        for p in procs:
+            self._kill_proc(p)
 
     @property
     def parallel_mode(self) -> bool:
@@ -555,13 +670,17 @@ class CommandRunner:
             text=True,
             errors="replace",
             bufsize=1,
+            start_new_session=True,  # own process group → children die too
         )
+        with self._procs_lock:
+            self._procs.add(proc)
 
         started = time.monotonic()
         tail: deque = deque(maxlen=TAIL_WINDOW)
         out_lines: list = []
         line_q: "queue.Queue[Optional[str]]" = queue.Queue()
         kill_flag = threading.Event()
+        panel_scroll = 0
 
         def reader() -> None:
             try:
@@ -585,8 +704,12 @@ class CommandRunner:
                 style = "bold green" if status.startswith("✔") else "bold red"
                 head = Text(f"{status}  ({elapsed:.1f}s)", style=style)
             max_tail = max(1, (self.console.height or 24) - 6)
-            tail_lines = list(tail)[-max_tail:]
+            lines = list(tail)
+            end = len(lines) - panel_scroll
+            start = max(0, end - max_tail)
+            tail_lines = lines[start:end]
             limit = self.console.height or 24
+            scrolled = f"[dim]↕ scrolled {panel_scroll}[/dim] " if panel_scroll else ""
 
             def build(lines: list) -> Panel:
                 return Panel(
@@ -594,7 +717,7 @@ class CommandRunner:
                     title=f"[bold cyan]{title}[/bold cyan]",
                     border_style="cyan",
                     padding=(0, 1),
-                    subtitle=f"[dim]{label}[/dim]",
+                    subtitle=f"[dim]{label}[/dim] {scrolled}",
                 )
 
             # cap the panel to the terminal height — a taller panel pushes
@@ -626,8 +749,8 @@ class CommandRunner:
             live.start()
 
         # single-panel mode: capture stdin in raw mode so typed keys don't
-        # echo into the live region; q/Esc closes the panel early (the
-        # command keeps running, plain lines take over)
+        # echo into the live region; q/Esc/Ctrl-C cancels the command (the
+        # process group is killed — no background process survives)
         keys_q: "queue.Queue[str]" = queue.Queue()
         key_stop = threading.Event()
         key_thread: Optional[_KeyReader] = None
@@ -640,6 +763,11 @@ class CommandRunner:
             while True:
                 if kill_flag.is_set():
                     break
+                if self._cancel_event.is_set():
+                    self._kill_proc(proc)
+                    if check:
+                        raise CommandError(f"{display} (cancelled)", 130, log)
+                    return subprocess.CompletedProcess(cmd, 130, "", "")
                 if key_thread is not None:
                     while True:
                         try:
@@ -649,18 +777,29 @@ class CommandRunner:
                         if k in ("q", "Q", "escape", "\x03"):
                             panel_closed = True
                             break
+                        if k == "scroll_up":
+                            panel_scroll = min(
+                                panel_scroll + 3, max(0, len(tail) - 1)
+                            )
+                        elif k == "scroll_down":
+                            panel_scroll = max(0, panel_scroll - 3)
                     if panel_closed:
                         live.stop()  # type: ignore[union-attr]
                         live = None
                         key_stop.set()
                         key_thread.join(timeout=1)
                         key_thread = None
+                        self._cancel_event.set()
+                        self._kill_proc(proc)
                         if not quiet:
                             self.console.print(
-                                "  [dim]panel closed — output continues below[/dim]"
+                                "  [red]✗ {label}[/red] cancelled by user"
                             )
+                        if check:
+                            raise CommandError(f"{display} (cancelled)", 130, log)
+                        return subprocess.CompletedProcess(cmd, 130, "", "")
                 if timeout and time.monotonic() - started > timeout:
-                    proc.kill()
+                    self._kill_proc(proc)
                     try:
                         proc.wait(timeout=10)
                     except Exception:  # noqa: BLE001
@@ -690,12 +829,15 @@ class CommandRunner:
                     live.update(render("running..."))
         except KeyboardInterrupt:
             kill_flag.set()
-            proc.kill()
+            self._kill_proc(proc)
             if live:
-                live.update(render("✗ interrupted by user", animated=False))
-            if check:
-                raise CommandError(f"{display} (interrupted)", 130, log)
-            return subprocess.CompletedProcess(cmd, 130, "", "")
+                try:
+                    live.update(render("✗ interrupted by user", animated=False))
+                except Exception:  # noqa: BLE001
+                    pass
+            # propagate — the caller aborts the whole pipeline, not just
+            # this one command
+            raise
         finally:
             if key_thread is not None:
                 key_stop.set()
@@ -710,12 +852,14 @@ class CommandRunner:
                     log_fh.close()
                 except Exception:  # noqa: BLE001
                     pass
+            with self._procs_lock:
+                self._procs.discard(proc)
 
         # drain any remaining output / wait for process
         try:
             proc.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            self._kill_proc(proc)
             proc.wait()
 
         # flush remaining queued lines into the log
@@ -792,18 +936,29 @@ class CommandRunner:
                 f"  [bold cyan]▶ {title or label}[/bold cyan] [dim]« {len(inputs):,} lines[/dim]"
             )
 
+        proc: Optional[subprocess.Popen] = None
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                input="\n".join(inputs) + ("\n" if inputs else ""),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                timeout=timeout,
                 env=env_full,
                 text=True,
                 errors="replace",
+                start_new_session=True,  # own process group → children die too
             )
-            out = proc.stdout or ""
+            with self._procs_lock:
+                self._procs.add(proc)
+            try:
+                out, _ = proc.communicate(
+                    input="\n".join(inputs) + ("\n" if inputs else ""),
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                self._kill_proc(proc)
+                out = proc.stdout.read() if proc.stdout else ""
+            out = out or ""
             if log:
                 with open(log, "w", encoding="utf-8", errors="replace") as f:
                     f.write(out)
@@ -815,15 +970,14 @@ class CommandRunner:
                     self.console.print(f"  [red]✗ {label}[/red] exited with code {proc.returncode}")
                 raise CommandError(display, proc.returncode, log)
             return out
-        except subprocess.TimeoutExpired:
-            elapsed = time.monotonic() - started
-            if view_on:
-                self.parallel_view.finish(view_sid, -9, elapsed)
-            if not quiet and not view_on:
-                self.console.print(f"  [yellow]⚠ {label}[/yellow] timed out after {timeout}s")
-            if check:
-                raise CommandError(f"{display} (timeout {timeout}s)", -9, log)
-            return ""
+        except KeyboardInterrupt:
+            if proc is not None:
+                self._kill_proc(proc)
+            raise
+        finally:
+            if proc is not None:
+                with self._procs_lock:
+                    self._procs.discard(proc)
 
     # ------------------------------------------------------------------ #
     def run_python(

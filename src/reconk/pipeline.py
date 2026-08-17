@@ -31,7 +31,7 @@ from rich.table import Table
 from reconk.config import Config
 from reconk.modules import ModuleResult, REGISTRY
 from reconk.output import OutputTree
-from reconk.runner import CommandRunner
+from reconk.runner import CommandError, CommandRunner
 from reconk.scope import Scope
 
 #: full pipeline as ordered stages (parallel groups)
@@ -162,20 +162,43 @@ class Pipeline:
         counts = Counter()  # phase name -> times run (for round labels)
         try:
             for group in stages:
+                if self.runner.cancel_event.is_set():
+                    self.console.print(
+                        "  [yellow]! cancelled — skipping remaining stages[/yellow]"
+                    )
+                    break
                 parallel = len(group) > 1
                 self.runner.parallel_mode = parallel
                 if parallel:
-                    with ThreadPoolExecutor(max_workers=len(group), thread_name_prefix="reconk") as pool:
-                        futs = {pool.submit(self._run_phase, name, counts[name] + 1, group): name for name in group}
+                    pool = ThreadPoolExecutor(
+                        max_workers=len(group), thread_name_prefix="reconk"
+                    )
+                    futs = {
+                        pool.submit(self._run_phase, name, counts[name] + 1, group): name
+                        for name in group
+                    }
+                    try:
                         for fut in futs:
                             result = fut.result()
                             counts[result.name] += 1
                             self.results.append(result)
+                    finally:
+                        # cancel_futures: on Ctrl-C we kill every tool (the
+                        # runner's cancel()) so the still-queued phases never
+                        # start; wait=True lets the in-flight ones finish
+                        # fast (their processes are already dead)
+                        pool.shutdown(wait=True, cancel_futures=True)
                 else:
                     name = group[0]
                     result = self._run_phase(name, counts[name] + 1, group)
                     counts[result.name] += 1
                     self.results.append(result)
+        except KeyboardInterrupt:
+            # kill every running tool (process groups) before propagating,
+            # so the ThreadPoolExecutor's wait below returns immediately
+            # instead of blocking on live background processes
+            self.runner.cancel()
+            raise
         finally:
             # always tear the parallel view down — a quit/interrupt must not
             # leave the terminal in raw mode or an orphaned Live
@@ -200,6 +223,12 @@ class Pipeline:
         t0 = time.monotonic()
         try:
             result = mod.run()
+        except CommandError as e:
+            if self.runner.cancel_event.is_set():
+                self.console.print(f"  [yellow]! {name} cancelled[/yellow]")
+            else:
+                self.console.print(f"  [red]✗ {name} failed: {e}[/red]")
+            result = ModuleResult(name, ok=False, message=str(e))
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [red]✗ {name} crashed: {e}[/red]")
             result = ModuleResult(name, ok=False, message=str(e))

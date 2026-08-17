@@ -96,7 +96,14 @@ def _run_pipeline(
     pipeline = Pipeline(cfg, scope, out, runner, console, skip=skip, only=only)
 
     t0 = time.monotonic()
-    results = pipeline.run_all()
+    try:
+        results = pipeline.run_all()
+    except KeyboardInterrupt:
+        # stop every tool the runner spawned (process groups), restore the
+        # terminal, and exit — nothing may keep running in the background
+        runner.shutdown()
+        console.print("[red]✗ interrupted — all running tools were stopped[/red]")
+        return 130
     elapsed = time.monotonic() - t0
 
     # report
