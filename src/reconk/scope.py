@@ -23,16 +23,8 @@ from typing import List, Optional, Tuple
 _WILDCARD_RE = re.compile(r"^\*\.(.+)$")
 _IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 _ASN_RE = re.compile(r"^(?:AS)?(\d{1,10})$", re.IGNORECASE)
-_TLD_BLOCK = (
-    "com", "net", "org", "io", "co", "ai", "dev", "app", "xyz", "info",
-    "biz", "me", "tv", "cc", "in", "tech", "online", "site", "store",
-    "cloud", "uk", "us", "ca", "au", "de", "fr", "nl", "ru", "jp", "cn",
-    "br", "mx", "in", "za", "se", "no", "fi", "dk", "pl", "it", "es",
-    "ch", "at", "be", "ie", "pt", "gr", "tr", "il", "ae", "sg", "hk",
-    "kr", "tw", "th", "vn", "ph", "id", "my", "nz", "ar", "cl", "pe",
-    "co.uk", "co.in", "com.au", "co.jp", "com.br", "co.nz", "gov.in",
-    "org.uk", "ac.uk", "gov.uk", "com.sg", "com.hk", "com.my", "com.pk",
-)
+#: any hostname label: [a-z0-9] with interior hyphens, max 63 chars
+_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 
 
 @dataclass
@@ -77,7 +69,7 @@ class Scope:
         scope = cls(name=name, force_wildcard=force_wildcard)
         entries: List[str] = []
         if target:
-            entries += [e.strip().lower() for e in re.split(r"[\s,]+", target) if e.strip()]
+            entries += [e.strip().lower() for e in re.split(r"[\s,;]+", target) if e.strip()]
         if file:
             fpath = Path(file).expanduser()
             if not fpath.exists():
@@ -85,7 +77,7 @@ class Scope:
             for raw in fpath.read_text(errors="replace").splitlines():
                 line = raw.strip()
                 if line and not line.startswith("#"):
-                    entries += [e.strip().lower() for e in re.split(r"[\s,]+", line) if e.strip()]
+                    entries += [e.strip().lower() for e in re.split(r"[\s,;]+", line) if e.strip()]
 
         scope.raw_entries = entries
         for entry in entries:
@@ -111,7 +103,8 @@ class Scope:
         # Wildcard
         m = _WILDCARD_RE.match(entry)
         if m:
-            self.wildcards.append(m.group(1))
+            base = m.group(1).split("/", 1)[0].rstrip(".")
+            self.wildcards.append(base)
             return
 
         # CIDR / IP
@@ -121,7 +114,7 @@ class Scope:
                     net = ipaddress.ip_network(entry, strict=False)
                     self.cidrs.append(str(net))
                 else:
-                    self.ips.append(entry)
+                    self.ips.append(str(ipaddress.ip_address(entry)))
                 return
             except ValueError:
                 pass  # fall through, maybe an org/domain
@@ -132,7 +125,8 @@ class Scope:
             self.asns.append(f"AS{m.group(1)}")
             return
 
-        # Domain-ish? has a dot and TLD block
+        # Domain-ish? has a dot and valid labels (no TLD whitelist — every
+        # real TLD incl. punycode/new gTLDs must classify as a domain)
         if "." in entry:
             domain = entry.rstrip(".")
             if self._looks_like_domain(domain):
@@ -144,12 +138,15 @@ class Scope:
 
     @staticmethod
     def _looks_like_domain(value: str) -> bool:
-        if not re.match(r"^[a-z0-9][a-z0-9\-.]*$", value):
+        if not value or value.count(".") < 1:
             return False
-        parts = value.split(".")
-        if len(parts) < 2:
+        labels = value.split(".")
+        if any(not _LABEL_RE.match(lbl) for lbl in labels):
             return False
-        return parts[-1] in _TLD_BLOCK or parts[-2] in _TLD_BLOCK
+        # TLDs are alphabetic or punycode — excludes things like "1.2.3.4"
+        # that already failed the IP check (999.999.999.999, IPv6, ...)
+        tld = labels[-1]
+        return bool(re.match(r"^[a-z][a-z0-9\-]*$", tld)) or tld.startswith("xn--")
 
     # ------------------------------------------------------------------ #
     # Query helpers
@@ -174,7 +171,11 @@ class Scope:
         """True when subdomain enumeration is in scope."""
         if self.force_wildcard:
             return bool(self.domains)
-        return bool(self.wildcards) and not self.domains
+        if not self.wildcards:
+            return False
+        # the wildcard bases are copied into `domains` by from_input(),
+        # so a pure wildcard scope has domains == wildcard bases
+        return set(self.domains).issubset(set(self.wildcards))
 
     @property
     def is_single(self) -> bool:
@@ -208,13 +209,8 @@ class Scope:
         if self.is_single:
             for domain in self.domains:
                 hosts.append(domain)
-                if domain not in ("www." + domain,):
+                if not domain.startswith("www."):
                     hosts.append(f"www.{domain}")
-            # Hosts that are themselves subdomains were listed explicitly
-            # (e.g. www.example.com) — they are in scope by definition.
-            for domain in self.domains:
-                if domain.startswith("www."):
-                    hosts.append(domain)
         return sorted(set(hosts))
 
     def all_domains(self) -> List[str]:

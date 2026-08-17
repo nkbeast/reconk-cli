@@ -5,8 +5,15 @@ Every command runs inside a rich Live panel that shows:
   * the tool's stdout/stderr streaming in real time (tail window)
   * final status on completion
 
-All output is also captured to per-phase log files. The same class drives
-external binaries and bundled python scripts.
+While a *parallel* stage runs, all tools stream at once in a split-screen
+view — every command gets its own panel ("agent"). Press 1-9 (or Tab) to
+focus a panel: the focused tool is enlarged and shows more of its stream,
+the others stay compact and keep updating. `q`/`Esc` quits the view for
+the current stage and falls back to plain status lines.
+
+All output is also captured to per-phase log files when a ``log_dir`` is
+configured (default: off — see ``output.save_tool_logs``). The same class
+drives external binaries and bundled python scripts.
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from rich.console import Console, Group
+from rich.layout import Layout
+from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
@@ -46,15 +55,325 @@ class ToolNotFound(RuntimeError):
     """Raised when a binary is missing from PATH."""
 
 
+# --------------------------------------------------------------------------- #
+# Parallel split-screen view
+# --------------------------------------------------------------------------- #
+class _Stream:
+    """Live state of a single tool running inside the parallel view."""
+
+    def __init__(self, title: str, label: str, quiet: bool = False):
+        self.title = title
+        self.label = label
+        self.quiet = quiet
+        self.tail: deque = deque(maxlen=TAIL_WINDOW)
+        self.done = False
+        self.ok = True
+        self.elapsed = 0.0
+        self.started = time.monotonic()
+
+
+class _KeyReader(threading.Thread):
+    """Reads single keys (raw mode) from stdin into a queue."""
+
+    def __init__(self, keys: "queue.Queue[str]", stop: threading.Event):
+        super().__init__(daemon=True)
+        self.keys = keys
+        self.stop = stop
+
+    def run(self) -> None:
+        if sys.platform == "win32":
+            try:
+                import msvcrt
+            except Exception:  # noqa: BLE001
+                return
+            while not self.stop.is_set():
+                try:
+                    if msvcrt.kbhit():
+                        self.keys.put(msvcrt.getwch())
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(0.05)
+            return
+        import select
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        try:
+            old = termios.tcgetattr(fd)
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            tty.setcbreak(fd)
+            while not self.stop.is_set():
+                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if r:
+                    try:
+                        ch = os.read(fd, 1).decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        break
+                    if ch:
+                        self.keys.put(ch)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+class ParallelView:
+    """Split-screen live view of all concurrently running tools.
+
+    Each running command registers a stream via :meth:`add` and pushes its
+    stdout/stderr lines via :meth:`update`. A dedicated render thread owns
+    a rich ``Live`` and redraws the whole dashboard every refresh tick:
+    a header row of tool chips, plus one panel per tool — the focused
+    panel is enlarged (and bright) and shows more stream lines, while the
+    rest stay compact and keep streaming.
+
+    Keys while the view is up:
+      1-9      focus a tool panel
+      Tab / n  cycle focus to the next tool
+      q / Esc / Ctrl-C  quit the view for this stage (plain lines take over)
+    """
+
+    FOCUSED_RATIO = 3
+    FOCUSED_LINES = 18
+    COMPACT_LINES = 4
+
+    def __init__(self, console: Console, refresh: float = REFRESH_SECONDS):
+        self.console = console
+        self.refresh = refresh
+        self.enabled = bool(console.is_terminal)
+        self.active = False
+        self._streams: dict = {}
+        self._order: list = []
+        self._focus = 0
+        self._lock = threading.RLock()
+        self._dirty = threading.Event()
+        self._stop = threading.Event()
+        self._live: Optional[Live] = None
+        self._thread: Optional[threading.Thread] = None
+        self._keys: "queue.Queue[str]" = queue.Queue()
+        self._key_thread: Optional[_KeyReader] = None
+
+    # ------------------------------------------------------------------ #
+    # stage lifecycle (driven by CommandRunner.parallel_mode)
+    # ------------------------------------------------------------------ #
+    def begin_stage(self) -> None:
+        """Re-arm the view for a new parallel stage."""
+        self.active = self.enabled
+        if not self.active:
+            return
+        with self._lock:
+            self._stop = threading.Event()
+            self._dirty.set()
+            self._focus = 0
+            self._streams.clear()
+            self._order.clear()
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        if self._key_thread is None or not self._key_thread.is_alive():
+            self._key_thread = _KeyReader(self._keys, self._stop)
+            self._key_thread.start()
+
+    def end_stage(self) -> None:
+        """Final render of the stage, then stop the view."""
+        if not self.active:
+            return
+        self.active = False
+        self._stop.set()
+        self._dirty.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+            self._thread = None
+        self._live = None
+        if self._key_thread:
+            self._key_thread.join(timeout=1)
+            self._key_thread = None
+
+    # ------------------------------------------------------------------ #
+    # stream API (called from runner threads)
+    # ------------------------------------------------------------------ #
+    def add(self, title: str, label: str, quiet: bool = False) -> str:
+        if not self.active:
+            return ""
+        with self._lock:
+            sid = f"{label}-{len(self._order)}"
+            self._streams[sid] = _Stream(title, label, quiet)
+            self._order.append(sid)
+            self._dirty.set()
+        return sid
+
+    def update(self, sid: str, line: str) -> None:
+        with self._lock:
+            s = self._streams.get(sid)
+            if s is None:
+                return
+            s.tail.append(line)
+            self._dirty.set()
+
+    def finish(self, sid: str, rc: int, elapsed: float) -> None:
+        with self._lock:
+            s = self._streams.get(sid)
+            if s is None:
+                return
+            s.done = True
+            s.ok = rc == 0
+            s.elapsed = elapsed
+            self._dirty.set()
+
+    # ------------------------------------------------------------------ #
+    # render loop (owns the Live)
+    # ------------------------------------------------------------------ #
+    def _loop(self) -> None:
+        live = Live(
+            self._render(),
+            console=self.console,
+            refresh_per_second=int(1 / self.refresh),
+            transient=False,
+            vertical_overflow="ellipsis",
+        )
+        live.start()
+        self._live = live
+        last_render = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                now = time.monotonic()
+                if now - last_render < self.refresh:
+                    self._dirty.wait(self.refresh - (now - last_render))
+                    self._dirty.clear()
+                    continue
+                self._process_keys()
+                try:
+                    live.update(self._render())
+                except Exception:  # noqa: BLE001
+                    pass
+                last_render = time.monotonic()
+            self._process_keys()
+            try:
+                live.update(self._render())
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            try:
+                live.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _process_keys(self) -> None:
+        while True:
+            try:
+                ch = self._keys.get_nowait()
+            except queue.Empty:
+                return
+            if ch in ("q", "Q", "\x1b", "\x03"):
+                self.active = False
+                self._stop.set()
+                continue
+            if ch.isdigit():
+                idx = int(ch) - 1
+                if 0 <= idx < len(self._order):
+                    self._focus = idx
+                    self._dirty.set()
+            elif ch in ("\t", "n", "N"):
+                if self._order:
+                    self._focus = (self._focus + 1) % len(self._order)
+                    self._dirty.set()
+
+    # ------------------------------------------------------------------ #
+    def _render(self) -> Panel:
+        with self._lock:
+            order = list(self._order)
+            streams = [self._streams[sid] for sid in order]
+            focus = self._focus if self._focus < len(streams) else 0
+
+        if not streams:
+            return Panel(
+                Text("starting parallel tools…", style="dim"),
+                border_style="cyan",
+                title="[bold cyan]Reconk — parallel stage[/bold cyan]",
+            )
+
+        header = Text()
+        for i, s in enumerate(streams):
+            mark = "✔" if s.done and s.ok else "✗" if s.done else "▶"
+            chip = f"[{i + 1}]{mark} {s.label}"
+            if i == focus:
+                header.append(f" {chip} ", style="bold cyan")
+            else:
+                header.append(f" {chip} ", style="dim")
+        header.append("   [q] quit view  [tab] next  [1-9] focus", style="bold white")
+
+        body = Layout()
+        cells = [Layout(header, size=1)]
+        for i, s in enumerate(streams):
+            cells.append(
+                Layout(
+                    self._stream_panel(s, focused=(i == focus)),
+                    ratio=(
+                        self.FOCUSED_RATIO if i == focus else 1
+                    ),
+                )
+            )
+        body.split_column(*cells)
+
+        return Panel(
+            body,
+            border_style="cyan",
+            title="[bold cyan]Reconk — parallel tools[/bold cyan]",
+            subtitle="[dim]press 1-9 to watch a tool's stream[/dim]",
+        )
+
+    def _stream_panel(self, s: _Stream, focused: bool) -> Panel:
+        if s.done:
+            style = "bold green" if s.ok else "bold red"
+            head = Text(f"{'✔' if s.ok else '✗'} {s.title}  ({s.elapsed:.1f}s)", style=style)
+        else:
+            head = Spinner("dots", text=f" {s.title}  {time.monotonic() - s.started:5.1f}s", style="cyan")
+        lines = list(s.tail)
+        body: list = [head, Text("")]
+        if focused:
+            body += [Text(l, style="bright_black") for l in lines[-self.FOCUSED_LINES:]]
+        else:
+            body += [Text(l, style="grey37") for l in lines[-self.COMPACT_LINES:]]
+        return Panel(
+            Group(*body),
+            title=f"[{'bold cyan' if focused else 'dim'}]{s.label}[/{'bold cyan' if focused else 'dim'}]",
+            border_style="cyan" if focused else "grey37",
+            padding=(0, 1),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Command runner
+# --------------------------------------------------------------------------- #
 class CommandRunner:
     """Executes commands with a live streaming TUI panel."""
 
-    def __init__(self, console: Console, log_dir: Optional[Path] = None):
+    def __init__(self, console: Console, log_dir: Optional[Path] = None, verbose: bool = False):
         self.console = console
         self.log_dir = log_dir
-        #: set by the pipeline while a parallel stage runs — phases then
-        #: stream via plain status lines instead of overlapping Live panels
-        self.parallel_mode = False
+        self.verbose = verbose
+        self.parallel_view = ParallelView(console)
+        self._parallel_mode = False
+
+    @property
+    def parallel_mode(self) -> bool:
+        """True while a parallel stage runs — phases then stream via the
+        split-screen view instead of overlapping Live panels."""
+        return self._parallel_mode
+
+    @parallel_mode.setter
+    def parallel_mode(self, value: bool) -> None:
+        self._parallel_mode = value
+        if value:
+            self.parallel_view.begin_stage()
+        else:
+            self.parallel_view.end_stage()
 
     # ------------------------------------------------------------------ #
     def _log_path(self, name: str) -> Optional[Path]:
@@ -109,7 +428,13 @@ class CommandRunner:
         if env:
             env_full.update(env)
 
-        if not quiet:
+        if self.verbose:
+            self.console.print(f"  [dim]$ {display}[/dim]")
+
+        view_on = self._parallel_mode and self.parallel_view.active
+        view_sid = self.parallel_view.add(title, label, quiet) if view_on else ""
+
+        if not quiet and not view_on:
             self.console.print(f"  [bold cyan]▶ {title}[/bold cyan] [dim]{display[:120]}[/dim]")
 
         log_fh = None
@@ -164,9 +489,7 @@ class CommandRunner:
                 subtitle=f"[dim]{label}[/dim]",
             )
 
-        from rich.live import Live
-
-        if quiet or self.parallel_mode:
+        if quiet or self._parallel_mode or view_on:
             live = None
         else:
             live = Live(
@@ -207,7 +530,9 @@ class CommandRunner:
                 if log_fh:
                     log_fh.write(line + "\n")
                     log_fh.flush()
-                if live:
+                if view_on:
+                    self.parallel_view.update(view_sid, line)
+                elif live:
                     live.update(render("running..."))
         except KeyboardInterrupt:
             kill_flag.set()
@@ -248,6 +573,8 @@ class CommandRunner:
         elapsed = time.monotonic() - started
         rc = proc.returncode
 
+        if view_on:
+            self.parallel_view.finish(view_sid, rc, elapsed)
         if live:
             if rc == 0:
                 live.update(render(f"✔ completed in {elapsed:.1f}s", animated=False))
@@ -257,14 +584,14 @@ class CommandRunner:
                 live.stop()
             except Exception:  # noqa: BLE001
                 pass
-        elif not quiet and self.parallel_mode:
+        elif not quiet and self._parallel_mode and not view_on:
             if rc == 0:
                 self.console.print(f"  [green]✔ {label}[/green] completed in {elapsed:.1f}s")
             else:
                 self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
 
         if check and rc != 0:
-            if not quiet:
+            if not quiet and not view_on:
                 self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
             raise CommandError(display, rc, log)
 
@@ -289,14 +616,18 @@ class CommandRunner:
         display = " ".join(shlex.quote(c) for c in cmd)
         log = self._log_path(label)
 
-        if not quiet:
-            self.console.print(
-                f"  [bold cyan]▶ {title or label}[/bold cyan] [dim]« {len(inputs):,} lines[/dim]"
-            )
-
         env_full = dict(os.environ)
         if env:
             env_full.update(env)
+
+        view_on = self._parallel_mode and self.parallel_view.active
+        view_sid = self.parallel_view.add(title or label, label, quiet) if view_on else ""
+        started = time.monotonic()
+
+        if not quiet and not view_on:
+            self.console.print(
+                f"  [bold cyan]▶ {title or label}[/bold cyan] [dim]« {len(inputs):,} lines[/dim]"
+            )
 
         try:
             proc = subprocess.run(
@@ -313,13 +644,19 @@ class CommandRunner:
             if log:
                 with open(log, "w", encoding="utf-8", errors="replace") as f:
                     f.write(out)
+            elapsed = time.monotonic() - started
+            if view_on:
+                self.parallel_view.finish(view_sid, proc.returncode, elapsed)
             if check and proc.returncode != 0:
-                if not quiet:
+                if not quiet and not view_on:
                     self.console.print(f"  [red]✗ {label}[/red] exited with code {proc.returncode}")
                 raise CommandError(display, proc.returncode, log)
             return out
         except subprocess.TimeoutExpired:
-            if not quiet:
+            elapsed = time.monotonic() - started
+            if view_on:
+                self.parallel_view.finish(view_sid, -9, elapsed)
+            if not quiet and not view_on:
                 self.console.print(f"  [yellow]⚠ {label}[/yellow] timed out after {timeout}s")
             if check:
                 raise CommandError(f"{display} (timeout {timeout}s)", -9, log)

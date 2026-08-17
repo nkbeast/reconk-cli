@@ -99,17 +99,38 @@ class Pipeline:
         self.results: List[ModuleResult] = []
 
     # ------------------------------------------------------------------ #
-    def stages(self) -> List[List[str]]:
-        """Ordered stages after skip/only filtering (empty stages dropped)."""
+    def _raw_stages(self) -> List[List[str]]:
+        """Stages for this scope mode, before skip/only filtering."""
         mode = self.scope.mode
         if mode == "single":
-            raw = SINGLE_STAGES
-        elif mode == "network":
+            return SINGLE_STAGES
+        if mode == "network":
+            return NETWORK_STAGES
+        raw = WILDCARD_STAGES
+        if not self.scope.has_web_targets:
             raw = NETWORK_STAGES
-        else:  # wildcard / mixed
-            raw = WILDCARD_STAGES
-            if not self.scope.has_web_targets:
-                raw = NETWORK_STAGES
+        return raw
+
+    def stages(self) -> List[List[str]]:
+        """Ordered stages after skip/only filtering (empty stages dropped)."""
+        raw = self._raw_stages()
+        applicable = {p for group in raw for p in group}
+        known = {cls.name for cls in REGISTRY}
+        for flag, phases in (("skip", self.skip), ("only", self.only)):
+            if not phases:
+                continue
+            unknown = sorted(phases - known)
+            if unknown:
+                self.console.print(
+                    f"  [yellow]⚠ {flag}: unknown phase(s) {', '.join(unknown)} — ignored[/yellow]"
+                )
+            irrelevant = sorted((phases & known) - applicable)
+            if irrelevant:
+                verb = "does not run" if len(irrelevant) == 1 else "do not run"
+                self.console.print(
+                    f"  [yellow]⚠ {flag}: {', '.join(irrelevant)} {verb} in the "
+                    f"{self.scope.mode} workflow — ignored[/yellow]"
+                )
         stages: List[List[str]] = []
         for group in raw:
             kept = [p for p in group if p not in self.skip]

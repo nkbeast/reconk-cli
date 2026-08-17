@@ -22,7 +22,7 @@ from rich.table import Table
 from reconk import __version__
 from reconk.banner import TAGLINE, get_banner
 from reconk.config import Config
-from reconk.output import OutputTree
+from reconk.output import OutputTree, validate_target_name
 from reconk.pipeline import Pipeline, MODULE_LABELS
 from reconk.report import build_report, write_txt_report
 from reconk.runner import CommandRunner, ToolNotFound
@@ -46,17 +46,39 @@ def _run_pipeline(
     # mixed scope: run the single workflow first, then the wildcard
     # workflow, into <target>/single and <target>/wildcard (collapsed tree)
     if scope.mode == "mixed":
+        base = Path(base_dir) if base_dir else Path(cfg.output_base_dir()).expanduser()
+        top = base / scope.name
+        top.mkdir(parents=True, exist_ok=True)
+        # persist the combined scope at the top level so list/resume/report
+        # work for this target (each sub-run writes its own scope too)
+        scope.to_file(top / "scope.txt")
         singles = [d for d in scope.domains if d not in scope.wildcards]
         wilds = scope.wildcards + scope.network_targets() + scope.orgs
+        t0 = time.monotonic()
         rc = 0
         if singles:
             s_scope = Scope.from_input(scope.name, ",".join(singles))
-            rc |= _run_pipeline(cfg, s_scope, skip=skip, only=only, base_dir=base_dir,
-                                verbose=verbose, target_name=f"{scope.name}/single")
+            rc |= _run_pipeline(cfg, s_scope, skip=_filter_phases_for_mode(skip, "single"),
+                                only=_filter_phases_for_mode(only, "single"),
+                                base_dir=base_dir, verbose=verbose,
+                                target_name=f"{scope.name}/single")
         if wilds:
             w_scope = Scope.from_input(scope.name, ",".join(wilds), force_wildcard=True)
             rc |= _run_pipeline(cfg, w_scope, skip=skip, only=only, base_dir=base_dir,
                                 verbose=verbose, target_name=f"{scope.name}/wildcard")
+        elapsed = time.monotonic() - t0
+        # combined report + manifest at the top level
+        top_out = OutputTree(base, scope.name)
+        merged = {}
+        for part in ("single", "wildcard"):
+            part_report = build_report(OutputTree(base, f"{scope.name}/{part}"), scope, 0.0)
+            for key, value in part_report["counts"].items():
+                merged[key] = merged.get(key, 0) + value
+        report = build_report(top_out, scope, elapsed)
+        report["counts"] = merged
+        txt = write_txt_report(report, top_out.cat("reports") / "summary.txt")
+        top_out.save_manifest()
+        console.print(f"  [green]Reports: {txt}[/green]")
         return rc
 
     base = Path(base_dir) if base_dir else Path(cfg.output_base_dir()).expanduser()
@@ -69,7 +91,8 @@ def _run_pipeline(
     console.print(Panel.fit(f"[bold]Target[/bold] [green]{out.target}[/green]", border_style="green"))
     console.print(scope.summary())
 
-    runner = CommandRunner(console, log_dir=out.root / "logs")
+    log_dir = out.root / "logs" if str(cfg.get("output.save_tool_logs", "false")).lower() == "true" else None
+    runner = CommandRunner(console, log_dir=log_dir, verbose=verbose)
     pipeline = Pipeline(cfg, scope, out, runner, console, skip=skip, only=only)
 
     t0 = time.monotonic()
@@ -82,19 +105,23 @@ def _run_pipeline(
     out.save_manifest()
     console.print(f"  [green]Reports: {txt}[/green]")
 
-    return 0 if all(r.ok for r in results) else 1
+    return 2 if not results else (0 if all(r.ok for r in results) else 1)
 
 
 # --------------------------------------------------------------------------- #
 # subcommand handlers
 # --------------------------------------------------------------------------- #
 def _cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
-    scope = Scope.from_input(
-        args.target,
-        args.scope,
-        args.file,
-        force_wildcard=args.wildcard,
-    )
+    try:
+        scope = Scope.from_input(
+            args.target,
+            args.scope,
+            args.file,
+            force_wildcard=args.wildcard,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]! {e}[/red]")
+        return 2
     if scope.is_empty:
         console.print("[red]! Empty scope. Pass --scope or --file.[/red]")
         return 2
@@ -128,6 +155,9 @@ def _cmd_resume(args: argparse.Namespace, cfg: Config) -> int:
     if wild_marker.exists() and wild_marker.read_text().strip():
         force_wildcard = True
     scope = Scope.from_input(args.target, "", str(scope_file), force_wildcard=force_wildcard)
+    if scope.is_empty:
+        console.print(f"[red]! scope.txt for '{args.target}' is empty — nothing to resume[/red]")
+        return 2
     return _run_pipeline(cfg, scope, skip=args.skip, only=args.only, base_dir=str(base))
 
 
@@ -219,9 +249,12 @@ def _cmd_config(args: argparse.Namespace, cfg: Config) -> int:
     if args.show:
         console.print(Panel.fit("[bold]Active configuration[/bold]", border_style="cyan"))
         console.print(yaml.safe_dump(cfg.data, sort_keys=False))
-    else:
+        return 0
+    if args.init:
         dest = cfg.save()
         console.print(f"[green]Config written to {dest}[/green]")
+        return 0
+    console.print("[yellow]Pass --show to print the active config or --init to write it.[/yellow]")
     return 0
 
 
@@ -243,6 +276,28 @@ def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
 # --------------------------------------------------------------------------- #
 # TUI (interactive mode)
 # --------------------------------------------------------------------------- #
+#: phases that actually run per scope mode (subdomain enumeration and
+#: takeover only exist in the wildcard workflow, etc.)
+PHASES_SINGLE = ["dns", "live", "ports", "urls", "params", "js", "tech"]
+PHASES_NETWORK = ["horizontal", "ports", "live"]
+
+
+def _phases_for_mode(mode: str) -> List[str]:
+    if mode == "single":
+        return PHASES_SINGLE
+    if mode == "network":
+        return PHASES_NETWORK
+    return list(MODULE_LABELS)  # wildcard / mixed
+
+
+def _filter_phases_for_mode(phases: Optional[List[str]], mode: str) -> Optional[List[str]]:
+    """Keep only the phases from `phases` that actually run in `mode`."""
+    if not phases:
+        return phases
+    relevant = set(_phases_for_mode(mode))
+    return [p for p in phases if p in relevant]
+
+
 def _tui_collect_entries(questionary, label: str) -> List[str]:
     """Collect entries from the user, as many as they want to give."""
     entries: List[str] = []
@@ -251,12 +306,12 @@ def _tui_collect_entries(questionary, label: str) -> List[str]:
             questionary.text(
                 label,
                 default="",
-                instruction="comma separated — leave empty and press enter when done",
+                instruction="comma/space separated — leave empty and press enter when done",
             ).ask()
             or ""
         )
         if more.strip():
-            entries += [e.strip() for e in re.split(r"[\s,]+", more) if e.strip()]
+            entries += [e.strip() for e in re.split(r"[\s,;]+", more) if e.strip()]
         if not more.strip():
             break
         if not questionary.confirm("Add more?", default=False).ask():
@@ -271,18 +326,20 @@ def _tui_permutation(questionary) -> bool:
     ).ask() or False
 
 
-def _ask_skip(questionary) -> List[str]:
+def _ask_skip(questionary, mode: str = "wildcard") -> List[str]:
+    """Ask which phases to skip — only the phases relevant to `mode`."""
+    relevant = _phases_for_mode(mode)
     chosen = questionary.checkbox(
         "Phases to SKIP (space to toggle, enter to continue)",
-        choices=[questionary.Choice(label, value=name) for name, label in MODULE_LABELS.items()],
+        choices=[questionary.Choice(MODULE_LABELS[p], value=p) for p in relevant],
         instruction="leave empty to run everything",
     ).ask()
     return list(chosen or [])
 
 
 def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[str],
-                 wild_entries: List[str], permutation: bool, skip: List[str],
-                 nested: bool = False) -> Path:
+                 wild_entries: List[str], network_entries: List[str],
+                 permutation: bool, skip: List[str], nested: bool = False) -> Path:
     """Save every input the user gave BEFORE any recon starts.
 
     Writes into the output directory:
@@ -293,10 +350,11 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
     from datetime import datetime
 
     base = Path(cfg.output_base_dir()).expanduser()
+    validate_target_name(name)
     root = base / name
     root.mkdir(parents=True, exist_ok=True)
 
-    all_entries = sorted(set(single_entries + wild_entries))
+    all_entries = sorted(set(single_entries + wild_entries + network_entries))
     (root / "scope.txt").write_text("\n".join(all_entries) + "\n", encoding="utf-8")
 
     plan_files = (
@@ -339,9 +397,12 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
     lines += [f"    - {e}" for e in sorted(single_entries)] or ["    (none)"]
     lines += ["", "  WILDCARD SCOPES (full subdomain pipeline):"]
     lines += [f"    - {e}" for e in sorted(wild_entries)] or ["    (none)"]
+    lines += ["", "  NETWORK SCOPES (CIDRs / ASNs / IPs / orgs):"]
+    lines += [f"    - {e}" for e in sorted(network_entries)] or ["    (none)"]
     lines += [
         "",
-        f"  permutation scan : {'yes' if permutation else 'no'}",
+        (f"  permutation scan : {'yes' if permutation else 'no'}" if wild_entries
+         else "  permutation scan : n/a (no wildcard scope)"),
         f"  skipped phases   : {', '.join(sorted(skip)) or 'none'}",
         "",
         "  PHASE INPUT FILES (every tool is driven via -l / file args):",
@@ -370,7 +431,14 @@ def _save_inputs(cfg: Config, name: str, scope_type: str, single_entries: List[s
 
 def _tui_new_recon(cfg: Config) -> int:
     """Guided new-recon setup: collect ALL inputs first, save them into the
-    output directory, then run every phase from the saved files."""
+    output directory, then run every phase from the saved files.
+
+    The scan mode is detected from the input itself — no scope-type question:
+      * example.com                -> single workflow
+      * *.example.com              -> wildcard workflow (full subdomain pipeline)
+      * example.com,*.foo.com      -> both, split and run one after the other
+      * 1.2.3.0/24,AS12345         -> network workflow
+    """
     import questionary
 
     # ---- 1. collect everything --------------------------------------- #
@@ -380,66 +448,52 @@ def _tui_new_recon(cfg: Config) -> int:
         return 2
     name = name.strip()
 
-    scope_type = questionary.select(
-        "Scope type",
-        choices=[
-            "Single domains — no subdomain enumeration",
-            "Wildcard domains — full subdomain enumeration",
-            "Both single + wildcard domains",
-        ],
-    ).ask()
-    if not scope_type:
-        return 2
-
-    single_entries: List[str] = []
-    wild_entries: List[str] = []
-    if scope_type.startswith("Single"):
-        single_entries = _tui_collect_entries(
-            questionary, "Single domain(s) in scope (e.g. example.com)"
-        )
-    elif scope_type.startswith("Wildcard"):
-        wild_entries = _tui_collect_entries(
-            questionary, "Wildcard scope(s) (e.g. *.example.com or example.com)"
-        )
-    else:  # both
-        single_entries = _tui_collect_entries(
-            questionary, "Single domain(s) in scope — all of them, then wildcards"
-        )
-        wild_entries = _tui_collect_entries(
-            questionary, "Wildcard scope(s) (e.g. *.example.com or example.com)"
-        )
-
-    if not single_entries and not wild_entries:
+    entries = _tui_collect_entries(
+        questionary, "Scope — domains, wildcards (*.example.com), CIDRs, ASNs"
+    )
+    if not entries:
         console.print("[red]! No scope given at all.[/red]")
         return 2
+
+    # ---- 2. classify the input -> scan mode -------------------------- #
+    scope = Scope.from_input(name, ",".join(entries))
+    if scope.is_empty:
+        console.print("[red]! Nothing recognisable in that scope.[/red]")
+        return 2
+
+    single_entries = [d for d in scope.domains if d not in scope.wildcards]
+    wild_entries = [f"*.{w}" for w in scope.wildcards]
+    network_entries = scope.network_targets() + scope.orgs
+
+    if single_entries and (wild_entries or network_entries):
+        mode, scope_type, nested = "mixed", "Both single + wildcard domains", True
+    elif wild_entries:
+        mode, scope_type, nested = "wildcard", "Wildcard domains — full subdomain enumeration", False
+    elif network_entries:
+        mode, scope_type, nested = "network", "Network scope — CIDRs / ASNs / IPs", False
+    else:
+        mode, scope_type, nested = "single", "Single domains — no subdomain enumeration", False
 
     permutation = True
     if wild_entries:
         permutation = _tui_permutation(questionary)
 
-    skip = _ask_skip(questionary)
+    skip = _ask_skip(questionary, mode)
     if wild_entries and not permutation:
         skip = [s for s in skip if s != "vertical"] + ["vertical"]
 
-    # ---- 2. save inputs into the output dir, THEN start recon -------- #
-    nested = scope_type.startswith("Both")
+    # ---- 3. save inputs into the output dir, THEN start recon -------- #
     inputs_path = _save_inputs(
-        cfg, name, scope_type, single_entries, wild_entries, permutation, skip,
-        nested=nested,
+        cfg, name, scope_type, single_entries, wild_entries, network_entries,
+        permutation, skip, nested=nested,
     )
     console.print(f"  [green]✔ inputs saved: {inputs_path}[/green]")
 
-    # ---- 3. run the engagements from the saved files ----------------- #
-    rc = 0
-    if single_entries:
-        scope = Scope.from_input(name, ",".join(single_entries))
-        rc |= _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()),
-                            target_name=f"{name}/single" if nested else name)
-    if wild_entries:
-        scope = Scope.from_input(name, ",".join(wild_entries), force_wildcard=True)
-        rc |= _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()),
-                            target_name=f"{name}/wildcard" if nested else name)
-    return rc
+    # ---- 4. run the engagement from the saved files ------------------ #
+    # mixed scope is split inside _run_pipeline: single workflow first,
+    # then wildcard workflow -> <target>/single and <target>/wildcard
+    return _run_pipeline(cfg, scope, skip=skip, base_dir=str(cfg.output_base_dir()),
+                         target_name=name)
 
 
 def _tui_scan(cfg: Config) -> int:
@@ -460,7 +514,19 @@ def _tui_resume(cfg: Config) -> int:
     if not target:
         return 2
 
-    skip = _ask_skip(questionary)
+    # ask only about the phases that apply to this target's scope mode
+    root = base / target
+    force_wildcard = False
+    wild_marker = root / "scope_wildcards.txt"
+    if wild_marker.exists() and wild_marker.read_text().strip():
+        force_wildcard = True
+    scope_file = root / "scope.txt"
+    try:
+        scope = Scope.from_input(target, "", str(scope_file), force_wildcard=force_wildcard)
+        mode = scope.mode
+    except Exception:  # noqa: BLE001
+        mode = "wildcard"
+    skip = _ask_skip(questionary, mode)
     return _cmd_resume(
         argparse.Namespace(target=target, skip=skip, only=None, wildcard=False, out=None),
         cfg,
@@ -487,6 +553,7 @@ def _tui_report(cfg: Config) -> int:
 def _tui_menu(cfg: Config) -> int:
     import questionary
 
+    rc = 0
     while True:
         action = questionary.select(
             "Reconk — main menu",
@@ -502,19 +569,19 @@ def _tui_menu(cfg: Config) -> int:
         ).ask()
         if not action or action == "Exit":
             console.print("[dim]bye[/dim]")
-            return 0
+            return rc
         if action == "Start new recon (guided setup)":
-            _tui_scan(cfg)
+            rc = _tui_scan(cfg)
         elif action == "Resume / partial run on existing target":
-            _tui_resume(cfg)
+            rc = _tui_resume(cfg)
         elif action == "Show target report":
-            _tui_report(cfg)
+            rc = _tui_report(cfg)
         elif action == "List targets":
-            _cmd_list(argparse.Namespace(out=None), cfg)
+            rc = _cmd_list(argparse.Namespace(out=None), cfg)
         elif action == "Tool doctor":
-            _cmd_doctor(argparse.Namespace(), cfg)
+            rc = _cmd_doctor(argparse.Namespace(), cfg)
         elif action == "Show / init config":
-            _cmd_config(argparse.Namespace(show=True), cfg)
+            rc = _cmd_config(argparse.Namespace(show=True), cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -603,6 +670,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         except KeyboardInterrupt:
             console.print("\n[bold yellow]Interrupted by user.[/bold yellow]")
             return 130
+        except ValueError as e:
+            console.print(f"[red]! {e}[/red]")
+            return 2
 
     # ---- config command needs the raw config --------------------------------
     if args.command == "config":
@@ -621,6 +691,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         console.print(f"[red]{e}[/red]")
         console.print("[dim]Run `reconk doctor` to see what is missing.[/dim]")
         return 1
+    except ValueError as e:
+        console.print(f"[red]! {e}[/red]")
+        return 2
 
 
 if __name__ == "__main__":

@@ -25,6 +25,9 @@ DEFAULTS: Dict[str, Any] = {
     "output": {
         # Default base directory: ~/Documents/bugbounty/reconk/
         "base_dir": "~/Documents/bugbounty/reconk",
+        # Save per-tool command logs into <target>/logs/*.log (can use a
+        # lot of disk). false = only the manifest stays in logs/.
+        "save_tool_logs": "false",
     },
     "tools": {
         "resolvers": "~/.config/reconk/resolvers.txt",
@@ -55,8 +58,14 @@ DEFAULTS: Dict[str, Any] = {
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge `override` into `base` (override wins)."""
-    out = dict(base)
+    """Recursively merge `override` into `base` (override wins).
+
+    Deep-copies the base so callers can never mutate the shared DEFAULTS
+    dicts (e.g. cfg._data.setdefault("scan", ...)["x"] = ...).
+    """
+    import copy
+
+    out = copy.deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = _deep_merge(out[key], value)
@@ -114,7 +123,10 @@ class Config:
         return Path(self.get("output.base_dir", DEFAULTS["output"]["base_dir"])).expanduser()
 
     def tool_path(self, key: str) -> Path:
-        return Path(os.path.expanduser(str(self.get(f"tools.{key}"))))
+        value = self.get(f"tools.{key}")
+        if not value:
+            raise KeyError(f"tools.{key} is not configured")
+        return Path(os.path.expanduser(str(value)))
 
     def tool_exists(self, key: str) -> bool:
         return self.tool_path(key).exists()

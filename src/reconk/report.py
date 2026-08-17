@@ -88,7 +88,10 @@ def write_txt_report(report: dict, path: Path) -> Path:
 
     if report["counts"].get("js_js_secrets"):
         lines += ["", "  !! Review 07-js/js_secrets.txt — potential secrets found !!"]
-    if any(v and "takeover" in k for k, v in report["counts"].items()):
+    # warn only when a line actually carries the takeover verdict (takeover.txt
+    # also holds clean/error verdicts)
+    takeover_path = Path(report["output_root"]) / "09-takeover" / "takeover.txt"
+    if any("| takeover |" in line for line in _load(takeover_path)):
         lines += ["", "  !! Review 09-takeover/takeover.txt — takeover candidates !!"]
 
     lines += [

@@ -5,7 +5,8 @@ Creates a per-target directory layout:
 <base_dir>/<target>/
 ├── scope.txt
 ├── summary.txt
-├── logs/                     # per-phase command logs
+├── logs/                     # run manifest (+ per-tool logs when
+│                             #  output.save_tool_logs is enabled)
 ├── 01-dns/                   # DNS records + zone transfer
 ├── 02-subdomains/            # passive / active / vertical / horizontal
 │                             # + all_subdomains / resolved_subdomains (merge)
@@ -21,10 +22,25 @@ Creates a per-target directory layout:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List
 
 import yaml
+
+
+def validate_target_name(name: str) -> None:
+    """Reject target names that could escape the output base directory.
+
+    Nested names like ``acme/single`` are allowed (mixed-mode sub-targets);
+    any ``..`` segment, absolute path or backslash is not.
+    """
+    if not name or not name.strip():
+        raise ValueError("target name is empty")
+    if "\x00" in name or "\\" in name or name.startswith("/") or re.match(r"^[a-zA-Z]:", name):
+        raise ValueError(f"invalid target name: {name!r}")
+    if any(part in ("", ".", "..") for part in name.split("/")):
+        raise ValueError(f"invalid target name: {name!r}")
 
 CATEGORY_DIRS = {
     "dns": "01-dns",
@@ -46,6 +62,7 @@ class OutputTree:
     def __init__(self, base_dir: Path, target_name: str):
         self.base_dir = base_dir.expanduser()
         self.target = target_name
+        validate_target_name(target_name)
         self.root = self.base_dir / target_name
         self.files: Dict[str, List[str]] = {}  # category -> list of files
         self.stats: Dict[str, int] = {}
