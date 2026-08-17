@@ -83,7 +83,7 @@ SECRET_PATTERNS: List[tuple] = [
     ("S3 Bucket", r"\bhttps?://[a-z0-9\.\-]+\.s3[.-](?:[a-z0-9\-]+\.)?amazonaws\.com\b"),
     ("GCP Bucket", r"\bhttps?://[a-z0-9\.\-]+\.storage\.googleapis\.com\b"),
     ("Generic Bearer", r"""(?i)\b(?:bearer|token|apikey|api_key|secret)["']?\s*[:=]\s*["']([A-Za-z0-9_\-\.]{16,})["']"""),
-    ("Generic Secret Assignment", r"""(?i)(?:secret|password|passwd|pwd|client[_-]?secret)["']?\s*[:=]\s*["'][^"']{8,}["']"""),
+    ("Generic Secret Assignment", r"""(?i)\b(?:secret|password|passwd|pwd|client[_-]?secret)["']?\s*[:=]\s*["'](?=[A-Za-z0-9!@#$%^&*_\-\.+/=]{8,}["'])(?=[^"']*[0-9!@#$%^&*_\-\.+/=])[A-Za-z0-9!@#$%^&*_\-\.+/=]+["']"""),
 ]
 
 DEFAULT_JS_LIMIT = 1500
