@@ -17,12 +17,12 @@ runs all its phases in parallel threads.
   mixed    : the single workflow runs first, then the wildcard workflow,
              into <target>/single and <target>/wildcard (collapsed tree)
 
-Interactive behaviour:
-  * before every stage the user can run it, skip it, or quit the scan
-    ([Enter] run / [s] skip / [q] quit)
+Behaviour:
+  * every stage runs automatically in order — no per-stage prompt or
+    stop; skip any phase up front with --skip or the TUI checkbox list
   * progress is tracked in <target>/reconk.progress.json; starting a run
-    on a target that already has one offers to resume: completed and
-    user-skipped phases are skipped, failed/cancelled ones re-run
+    on a target that already has one offers to resume once: completed and
+    skipped phases are skipped, failed/cancelled ones re-run
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ import os
 import select
 import sys
 import termios
+import threading
 import time
 import tty
 from collections import Counter
@@ -117,6 +118,9 @@ class Pipeline:
         self.results: List[ModuleResult] = []
         self._resume_done: Dict[str, Set[int]] = {}
         self._resume_skipped: Dict[str, Set[int]] = {}
+        # progress file is read-modify-written by every phase; parallel
+        # stages would corrupt it without this lock
+        self._progress_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     def _raw_stages(self) -> List[List[str]]:
@@ -185,16 +189,18 @@ class Pipeline:
             return {}
 
     def _mark_progress(self, name: str, round_no: int, status: str) -> None:
-        data = self._load_progress()
-        data.setdefault("phases", {})[f"{name}#{round_no}"] = status
-        data["mode"] = self.scope.mode
-        data["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            self._progress_path().write_text(
-                json.dumps(data, indent=2), encoding="utf-8"
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        with self._progress_lock:
+            data = self._load_progress()
+            data.setdefault("phases", {})[f"{name}#{round_no}"] = status
+            data["mode"] = self.scope.mode
+            data["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                path = self._progress_path()
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                os.replace(tmp, path)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _expected_phase_keys(self) -> List[str]:
         """Every (name, round) the current plan will touch, in order."""
@@ -326,28 +332,6 @@ class Pipeline:
                     )
                 if not pending:
                     continue
-                # ---- interactive: run / skip / quit for this stage ----
-                if self.interactive and not self.runner.cancel_event.is_set():
-                    labels = ", ".join(
-                        MODULE_LABELS.get(n) or n for n, _ in pending
-                    )
-                    choice = self._prompt_key(
-                        f"Stage — {labels}",
-                        "  [dim][Enter] run   [s] skip   [q] quit scan[/dim]",
-                    )
-                    if choice == "q":
-                        self.runner.cancel()
-                        self.console.print(
-                            "  [yellow]! quitting — running tools will be killed[/yellow]"
-                        )
-                        break
-                    if choice == "s":
-                        for name, r in pending:
-                            self._mark_progress(name, r, "skipped")
-                            self.console.print(
-                                f"  [yellow]· {name} (round {r}) skipped[/yellow]"
-                            )
-                        continue
                 parallel = len(pending) > 1
                 self.runner.parallel_mode = parallel
                 if parallel:
