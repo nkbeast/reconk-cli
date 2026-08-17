@@ -338,11 +338,31 @@ class JsAnalysisModule(Module):
                     url = urljoin(base_url, url)
                 except Exception:  # noqa: BLE001
                     continue
+            # decode JS \uXXXX escapes so `http://\u0442\u0435\u0441\u0442`
+            # becomes `http://тест` and is then rejected by the host rules
+            if "\\u" in url:
+                url = re.sub(
+                    r"\\u([0-9a-fA-F]{4})",
+                    lambda m: chr(int(m.group(1), 16)),
+                    url,
+                )
             # bare-host match (dom group), e.g. `"api.example.com/v1/users"`
             if "://" not in url:
                 url = "https://" + url
-            if url.lower().startswith("http") and len(url) < 2000 and "{" not in url:
-                found.add(url)
+            if not (url.lower().startswith("http") and len(url) < 2000 and "{" not in url):
+                continue
+            try:
+                host = (urlparse(url).hostname or "").rstrip(".").lower()
+            except ValueError:
+                continue
+            # require a real host (dotted name, IP, or localhost) with no
+            # leftover escapes — `http://a` / `https://тест` and trailing
+            # backslashes are JS test fixtures, not endpoints
+            if not host or "\\" in url:
+                continue
+            if host not in ("localhost", "127.0.0.1", "::1") and "." not in host:
+                continue
+            found.add(url)
         return found
 
     # ------------------------------------------------------------------ #
