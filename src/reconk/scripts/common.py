@@ -135,10 +135,11 @@ def parse_scope_entries(lines: Iterable[str]) -> Iterator[tuple]:
     import re as _re
 
     asn_re = _re.compile(r"^(?:AS)?(\d{1,10})$", _re.IGNORECASE)
-    for line in lines:
-        line = line.strip().lower()
-        if not line or line.startswith("#"):
+    for raw in lines:
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
             continue
+        line = raw.lower()
         if line.startswith("*."):
             yield ("wildcard", line[2:])
         elif "/" in line:
@@ -148,7 +149,11 @@ def parse_scope_entries(lines: Iterable[str]) -> Iterator[tuple]:
             except ValueError:
                 yield ("domain", line)
         elif _re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", line):
-            yield ("ip", line)
+            try:
+                ipaddress.ip_address(line)
+                yield ("ip", line)
+            except ValueError:
+                yield ("org", raw)
         elif asn_re.match(line):
             m = asn_re.match(line)
             if m and 1 <= int(m.group(1)) <= 4294967295:
@@ -156,7 +161,8 @@ def parse_scope_entries(lines: Iterable[str]) -> Iterator[tuple]:
         elif "." in line:
             yield ("domain", line.rstrip("."))
         else:
-            yield ("org", line)
+            # org names keep their original case for the bgpview search
+            yield ("org", raw)
 
 
 def unique_preserve(items: Iterable[str]) -> List[str]:

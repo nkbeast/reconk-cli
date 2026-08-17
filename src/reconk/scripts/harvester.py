@@ -35,6 +35,10 @@ from rich.table import Table
 # ─────────────────────────────────────────────────────────────────────────────
 console = Console()
 
+#: set from --proxy; applied to every request (aiohttp has no session-level
+#: proxy for plain TCPConnector, so it is passed per request)
+PROXY: Optional[str] = None
+
 BANNER = r"""
 ⠀⠀⢀⡟⢀⡏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣧⠈⣧⠀⠀
 ⠀⠀⣼⠀⣼⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⡆⢸⡆⠀
@@ -182,6 +186,7 @@ async def _fetch_raw(
             timeout=aiohttp.ClientTimeout(total=timeout),
             allow_redirects=True,
             ssl=False,
+            proxy=PROXY,
         ) as resp:
             if resp.status not in allow_status:
                 return None
@@ -277,6 +282,7 @@ async def fetch_wayback(domain: str, session: ClientSession, sem: asyncio.Semaph
                     # connection must not hang the stage forever
                     timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
                     ssl=False,
+                    proxy=PROXY,
                 ) as resp:
                     if resp.status == 200:
                         async for raw_line in resp.content:
@@ -337,6 +343,7 @@ async def fetch_commoncrawl(domain: str, session: ClientSession, sem: asyncio.Se
                 headers={"User-Agent": ua, "Accept-Encoding": "gzip"},
                 timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=60),
                 ssl=False,
+                proxy=PROXY,
             ) as resp:
                 if resp.status != 200:
                     return
@@ -481,7 +488,7 @@ def save_results(result: CrawlResult, args: argparse.Namespace):
     all_hosts: set[str] = set()
     for url in result.urls:
         h = urlparse(url).hostname
-        if h and domain in h:
+        if h and (h == domain or h.endswith("." + domain)):
             all_hosts.add(h)
     if all_hosts:
         (dirs["subdomains"] / f"{domain}.txt").write_text(
@@ -607,6 +614,9 @@ def main():
 
     if not args.domain and not args.list:
         parser.error("provide -d/--domain or -l/--list")
+
+    global PROXY
+    PROXY = args.proxy
 
     try:
         asyncio.run(async_main(args))

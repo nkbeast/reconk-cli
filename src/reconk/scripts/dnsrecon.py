@@ -209,7 +209,6 @@ def main() -> int:
     grp.add_argument("-d", "--domain", help="single domain")
     grp.add_argument("-l", "--list", help="file with domains (one per line)")
     parser.add_argument("-o", "--output", default="dns.txt", help="text output file")
-    parser.add_argument("--records", action="store_true", default=True, help="run the full records suite (default)")
     parser.add_argument("--no-records", action="store_true", help="skip the records suite")
     parser.add_argument("--axfr-only", action="store_true", help="only zone transfer checks")
     args = parser.parse_args()
@@ -220,7 +219,7 @@ def main() -> int:
         print("no domains given", file=sys.stderr)
         return 1
 
-    do_records = args.records and not args.axfr_only and not args.no_records
+    do_records = not args.axfr_only and not args.no_records
     do_axfr = True
 
     t0 = time.monotonic()

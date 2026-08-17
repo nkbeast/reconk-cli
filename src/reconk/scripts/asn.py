@@ -30,7 +30,7 @@ import socket
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Set, Tuple
 
 import requests
@@ -163,21 +163,24 @@ def expand_targets(prefixes: List[str], ips: List[str], max_ips: int) -> List[st
     for pfx in prefixes:
         try:
             net = ipaddress.ip_network(pfx, strict=False)
-            if net.num_addresses > max_ips:
-                # sample the range
-                n = int(net.num_addresses)
-                step = max(1, n // SAMPLE_SIZE)
-                count = 0
-                for addr in net:
-                    if count % step == 0:
-                        targets.add(str(addr))
-                    count += 1
-                log(f"    sampling {pfx} ({n:,} addrs) -> ~{SAMPLE_SIZE} samples")
-            else:
-                for addr in net:
-                    targets.add(str(addr))
         except ValueError:
             continue
+        n = int(net.num_addresses)
+        if n > max_ips:
+            # sample arithmetically — keeps the walk O(SAMPLE_SIZE) and spreads
+            # the sample across the whole prefix instead of the leading block
+            step = max(1, n // SAMPLE_SIZE)
+            start = int(net.network_address)
+            for k in range(min(SAMPLE_SIZE, n)):
+                if len(targets) >= max_ips:
+                    break
+                targets.add(str(ipaddress.ip_address(start + k * step)))
+            log(f"    sampling {pfx} ({n:,} addrs) -> ~{min(SAMPLE_SIZE, max_ips)} samples")
+        else:
+            for addr in net:
+                if len(targets) >= max_ips:
+                    break
+                targets.add(str(addr))
     targets.update(ips)
     return sorted(t for t in targets if t)
 
@@ -447,13 +450,16 @@ def main() -> int:
     # ---- step 6: TLS SANs on alive hosts
     log(f"{TAG} TLS cert hostname harvesting")
     san_total = 0
+    alive_sorted = sorted(alive)
     with ThreadPoolExecutor(max_workers=32) as pool:
-        for ip in sorted(alive):
+        futs = {pool.submit(tls_san_hosts, ip): ip for ip in alive_sorted}
+        for fut in as_completed(futs):
             try:
-                sans = pool.submit(tls_san_hosts, ip).result()
+                sans = fut.result()
             except Exception:  # noqa: BLE001
                 continue
             for name in sans:
+                ip = futs[fut]
                 append_line(args.output, f"TLS|{ip}|{name}")
                 hosts_out.append(name)
                 san_total += 1
