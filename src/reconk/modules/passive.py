@@ -43,7 +43,7 @@ class PassiveEnumModule(Module):
         out_path = subdir / "subfinder.txt"
         cmd = [
             "subfinder",
-            "-dL", str(scope_file),
+            "-dL", str(self.scope_domains_file()),
             "-silent",
             "-o", str(out_path),
         ]
@@ -69,7 +69,8 @@ class PassiveEnumModule(Module):
             found = [l.strip() for l in out_path.read_text(errors="replace").splitlines() if l.strip()]
             res.files.append(str(out_path))
 
-        # dns module may have appended extra hosts earlier
+        # carry over what previous runs / the urls phase appended
+        # (resume --only passive must not lose earlier results)
         dns_hosts = self.ctx.out.read(self.category, "passive.txt")
         found = list(dict.fromkeys(dns_hosts + found))
 

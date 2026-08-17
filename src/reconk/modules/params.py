@@ -52,7 +52,8 @@ class ParamsModule(Module):
             if STATIC_EXTS.search(url):
                 continue
             param_urls.append(url)
-            key_counter.update(parse_qs(parsed.query).keys())
+            # keep_blank_values: valueless params (`?debug`) are real keys
+            key_counter.update(parse_qs(parsed.query, keep_blank_values=True).keys())
 
         if param_urls:
             p1 = self.ctx.out.write(self.category, "param_urls.txt", param_urls, dedupe=True)

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import re
 import threading
+import urllib3
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -28,6 +30,11 @@ import requests
 from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
 from reconk.runner import ToolNotFound
+
+#: JS downloads intentionally skip TLS verification (self-signed/expired
+#: certs are common on targets) — silence the urllib3 warning spam.
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --------------------------------------------------------------------------- #
 # Endpoint / URL extraction regexes
@@ -66,7 +73,7 @@ SECRET_PATTERNS: List[tuple] = [
     ("Twilio API", r"\bSK[0-9a-fA-F]{32}\b"),
     ("SendGrid Key", r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43}\b"),
     ("Mailgun Key", r"\bkey-[0-9a-zA-Z]{32}\b"),
-    ("Heroku API", r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"),
+    ("Heroku API", r"(?i)\bheroku[_-]?api[_-]?key\b.{0,40}[\"']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"),
     ("Firebase URL", r"\b[a-z0-9\-]+\.firebaseio\.com\b"),
     ("Firebase API", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     ("JWT", r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
@@ -90,6 +97,7 @@ class JsAnalysisModule(Module):
     def run(self) -> ModuleResult:
         res = ModuleResult(self.name)
         js_dir = self.ctx.out.cat(self.category)
+        self.start("JS analysis — katana crawl + endpoint/secret extraction")
 
         # ---- 1. katana js-crawl -------------------------------------------
         katana_js: List[str] = self._katana_crawl()
@@ -103,7 +111,7 @@ class JsAnalysisModule(Module):
 
         path = self.ctx.out.write(self.category, "js_files.txt", js_files, dedupe=True)
         res.files.append(str(path))
-        self.start(f"JS analysis — {len(js_files)} JS files")
+        self.console.print(f"  [cyan]· {len(js_files)} JS files to analyze[/cyan]")
 
         # ---- 3. download ----------------------------------------------------
         fetched = js_dir / "fetched"
@@ -166,7 +174,6 @@ class JsAnalysisModule(Module):
                 ],
                 name="katana_js",
                 timeout=3600,
-                quiet=True,
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ katana: {e}[/yellow]")
@@ -263,6 +270,9 @@ class JsAnalysisModule(Module):
                     url = urljoin(base_url, url)
                 except Exception:  # noqa: BLE001
                     continue
+            # bare-host match (dom group), e.g. `"api.example.com/v1/users"`
+            if "://" not in url:
+                url = "https://" + url
             if url.startswith("http") and len(url) < 2000 and "{" not in url:
                 found.add(url)
         return found

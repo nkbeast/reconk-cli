@@ -72,7 +72,6 @@ class LiveModule(Module):
                     "-timeout", "8",
                     "-retries", "2",
                     "-random-agent",
-                    "-follow-redirects",
                     "-status-code",
                     "-title",
                     "-tech-detect",
@@ -109,11 +108,12 @@ class LiveModule(Module):
             status = ""
             for p in parts[1:]:
                 if p.startswith("[") and p.endswith("]"):
-                    try:
-                        int(p[1:-1])
-                        status = p[1:-1]
-                    except ValueError:
-                        pass
+                    # first bracket token is the status code; validate it is a
+                    # real 3-digit HTTP code so titles like "Price [2024]" or
+                    # bracket-y location values are never misread as status
+                    code = p[1:-1]
+                    if code.isdigit() and 100 <= int(code) <= 599:
+                        status = code
                     break
             urls.append(url)
             status_counts.append(f"{status} {url}" if status else url)

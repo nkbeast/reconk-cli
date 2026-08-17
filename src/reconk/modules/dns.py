@@ -31,7 +31,7 @@ class DnsReconModule(Module):
         try:
             self.runner.run_python(
                 self.script("dnsrecon.py"),
-                ["-l", str(self.ctx.out.root / "scope.txt"), "-o", str(out_path)],
+                ["-l", str(self.scope_domains_file()), "-o", str(out_path)],
                 name="dnsrecon",
                 timeout=7200,
             )

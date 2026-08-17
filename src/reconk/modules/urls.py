@@ -11,10 +11,8 @@ staging per-domain buckets, which this module assembles into the reconk
 layout:
 
   * 05-urls/all_urls.txt            — every unique in-scope URL
-  * 05-urls/parameters/<d>.txt      — URLs with parameters (per domain)
-  * 05-urls/js/<d>.txt              — JS URLs (per domain)
-  * 05-urls/sensitive/<d>.txt       — sensitive file URLs (per domain)
   * 02-subdomains/urls_harvested.txt — hostnames observed in URLs
+  * 02-subdomains/passive.txt       — in-scope URL hosts added to the pool
 """
 
 from __future__ import annotations
@@ -71,13 +69,20 @@ class UrlHarvestModule(Module):
             res.count = len(merged)
 
         url_subs = self._merge_bucket(staging / "subdomains")
+        # only hosts that are actually in scope (suffix match — the
+        # harvester's own check is a substring match that admits
+        # lookalikes like `notexample.com`)
+        roots = self.ctx.scope.all_domains()
+        url_subs = [h for h in url_subs if any(h == d or h.endswith("." + d) for d in roots)]
         if url_subs:
             subs_path = self.ctx.out.write("subdomains", "urls_harvested.txt", url_subs, dedupe=True)
             res.files.append(str(subs_path))
 
         # merge subdomains harvested from URLs into the canonical pool so
-        # the later phases (js, tech, takeover) also see them
-        if url_subs:
+        # the later phases (js, tech, takeover) also see them. Single mode:
+        # skip it — urls runs in the same parallel stage as ports (which
+        # reads these files) and nothing downstream consumes them anyway.
+        if url_subs and not self.ctx.scope.is_single:
             self.ctx.out.append("subdomains", "passive.txt", url_subs)
             current = set(self.ctx.out.read("subdomains", "all_subdomains.txt"))
             current.update(url_subs)

@@ -10,12 +10,10 @@ Output: 04-ports/naabu_ports.txt (ip:port), plus a service mapping pass.
 
 from __future__ import annotations
 
-import json
-import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 
 from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
@@ -29,12 +27,12 @@ class PortScanModule(Module):
     category = "ports"
 
     def run(self) -> ModuleResult:
-        targets = self._collect_targets()
+        res = ModuleResult(self.name)
+        targets = self._collect_targets(res)
         if not targets:
             return ModuleResult(self.name, message="no IP targets")
 
         self.start(f"Port scan (naabu) — {len(targets)} IP(s)")
-        res = ModuleResult(self.name)
 
         try:
             self.runner.require("naabu")
@@ -82,7 +80,7 @@ class PortScanModule(Module):
         return res
 
     # ------------------------------------------------------------------ #
-    def _collect_targets(self) -> List[str]:
+    def _collect_targets(self, res: "ModuleResult") -> List[str]:
         """Gather IPs: subdomain A records + scope CIDRs/IPs."""
         targets: Set[str] = set()
 
@@ -107,6 +105,7 @@ class PortScanModule(Module):
             targets.update(ips)
             if ips:
                 ip_path = self.ctx.out.write(self.category, "resolved_ips.txt", sorted(ips), dedupe=True)
+                res.files.append(str(ip_path))
 
         return sorted(t for t in targets if t)
 

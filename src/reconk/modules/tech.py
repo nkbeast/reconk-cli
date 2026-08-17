@@ -1,12 +1,20 @@
 """Technology fingerprinting via the bundled native ``scripts/tech.py``.
 
-Fingerprints every alive endpoint: headers, cookies, title/generator
-meta, body markers, favicon hashes. Text-only output.
+Runs the full TechFingerprint v2 engine (Wappalyzer-style signature DB,
+confidence scoring, version extraction, implied technologies, TLS + security
+grade, favicon hashes, source-map detection). Text-only output.
 
-Output: 08-tech/tech.txt
+Output:
+  08-tech/techfingerprint_<stamp>.txt  — engine report
+  08-tech/tech.txt                     — canonical copy for reconk reports
 """
 
 from __future__ import annotations
+
+import glob
+import os
+from pathlib import Path
+from typing import Optional
 
 from reconk.modules.registry import ModuleResult, register
 from reconk.modules.base import Module
@@ -35,11 +43,17 @@ class TechFingerprintModule(Module):
         hosts_file = self.ctx.out.root / "tech_input.txt"
         hosts_file.write_text("\n".join(sorted(alive)) + "\n", encoding="utf-8")
 
-        out_path = self.ctx.out.cat(self.category) / "tech.txt"
+        cat_dir = self.ctx.out.cat(self.category)
+        # drop stale engine reports so a failed run can never present old data
+        for old in glob.glob(str(cat_dir / "techfingerprint_*.txt")):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
         try:
             self.runner.run_python(
                 self.script("tech.py"),
-                ["-l", str(hosts_file), "-o", str(out_path), "--threads", "30"],
+                ["-l", str(hosts_file), "-o", str(cat_dir), "--txt", "-c", "30"],
                 name="tech_fingerprint",
                 timeout=7200,
             )
@@ -48,11 +62,21 @@ class TechFingerprintModule(Module):
             res.ok = False
             res.message = str(e)
 
-        lines = self.ctx.out.read(self.category, "tech.txt")
-        if lines:
-            path = self.ctx.out.write(self.category, "tech.txt", lines, dedupe=True)
+        report = self._latest_report(cat_dir) if res.ok else None
+        if report:
+            lines = report.read_text(errors="replace").splitlines()
+            lines = [l for l in lines if l.strip()]
+            path = self.ctx.out.write(self.category, "tech.txt", lines, dedupe=False)
             res.files.append(str(path))
             res.count = len(lines)
 
         self.done(f"{res.count} fingerprint lines")
         return res
+
+    @staticmethod
+    def _latest_report(cat_dir: Path) -> Optional[Path]:
+        """Newest techfingerprint_*.txt written by the engine, if any."""
+        matches = glob.glob(str(cat_dir / "techfingerprint_*.txt"))
+        if not matches:
+            return None
+        return Path(max(matches, key=os.path.getmtime))

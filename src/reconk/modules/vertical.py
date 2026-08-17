@@ -14,7 +14,6 @@ Output: 02-subdomains/vertical.txt
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Set
 
@@ -70,6 +69,8 @@ class VerticalEnumModule(Module):
                 res.files.append(str(out_file))
         except ToolNotFound as e:
             self.console.print(f"  [yellow]⚠ {e}[/yellow]")
+            res.ok = False
+            res.message = str(e)
 
         # ---- 2. recursive passive -----------------------------------------
         recursive: List[str] = []
@@ -100,8 +101,9 @@ class VerticalEnumModule(Module):
             self.console.print(f"  [yellow]⚠ subfinder config not found: {sf_cfg} — skipping recursive scan[/yellow]")
 
         # ---- 3. merge -------------------------------------------------------
+        roots = self.ctx.scope.all_domains()
         merged = resolved + recursive
-        merged = [m for m in merged if any(f".{d}" in m for d in self.ctx.scope.all_domains())]
+        merged = [m for m in merged if any(m == d or m.endswith("." + d) for d in roots)]
         path = self.ctx.out.write(self.category, "vertical.txt", merged, dedupe=True)
         res.files.append(str(path))
         res.count = len(merged)

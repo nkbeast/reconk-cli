@@ -106,6 +106,18 @@ class Module:
         fallback.write_text("\n".join(BUILTIN_RESOLVERS) + "\n", encoding="utf-8")
         return fallback
 
+    def scope_domains_file(self) -> Path:
+        """A list file containing ONLY the root domains in scope.
+
+        The raw ``scope.txt`` may also carry CIDRs / ASNs / IPs / orgs
+        (mixed + network scopes) which would break domain-only tools like
+        subfinder (-dL) or puredns bruteforce (-d).
+        """
+        domains = sorted(set(self.ctx.scope.all_domains()))
+        path = self.ctx.out.root / "scope_domains.txt"
+        path.write_text("\n".join(domains) + ("\n" if domains else ""), encoding="utf-8")
+        return path
+
     def start(self, msg: str) -> None:
         self.console.print(f"\n[bold yellow]▶ {msg}[/bold yellow]")
 

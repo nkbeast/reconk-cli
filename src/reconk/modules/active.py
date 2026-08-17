@@ -42,7 +42,6 @@ class ActiveEnumModule(Module):
             res.message = str(e)
             return res
 
-        scope_file = self.ctx.out.root / "scope.txt"
         subdir = self.ctx.out.cat(self.category) / "active"
         subdir.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +54,7 @@ class ActiveEnumModule(Module):
                 [
                     "puredns", "bruteforce",
                     str(wordlist),
-                    "-d", str(scope_file),
+                    "-d", str(self.scope_domains_file()),
                     "-r", str(resolvers),
                     "-w", str(out_path),
                     "-q",
@@ -65,6 +64,8 @@ class ActiveEnumModule(Module):
             )
         except Exception as e:  # noqa: BLE001
             self.console.print(f"  [yellow]⚠ puredns bruteforce: {e}[/yellow]")
+            res.ok = False
+            res.message = str(e)
 
         found = []
         if out_path.exists():
@@ -72,8 +73,10 @@ class ActiveEnumModule(Module):
             res.files.append(str(out_path))
 
         if found:
-            self.ctx.out.append(self.category, "active.txt", found)
-            merged_path = self.ctx.out.write(self.category, "active.txt", found, dedupe=True)
+            # merge with earlier results instead of clobbering them
+            # (resume --only active must not lose previously found hosts)
+            old = self.ctx.out.read(self.category, "active.txt")
+            merged_path = self.ctx.out.write(self.category, "active.txt", old + found, dedupe=True)
             res.files.append(str(merged_path))
             res.count = len(found)
 

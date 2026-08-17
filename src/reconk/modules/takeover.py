@@ -50,12 +50,16 @@ class TakeoverModule(Module):
             res.ok = False
             res.message = str(e)
 
-        lines = self.ctx.out.read(self.category, "takeover.txt")
-        tak_over = [l for l in lines if "| takeover |" in l]
-        if lines:
-            path = self.ctx.out.write(self.category, "takeover.txt", lines, dedupe=True)
-            res.files.append(str(path))
-            res.count = len(tak_over)
+        lines: List[str] = []
+        tak_over: List[str] = []
+        if res.ok:
+            # only report data from a successful run — never stale leftovers
+            lines = self.ctx.out.read(self.category, "takeover.txt")
+            tak_over = [l for l in lines if "| takeover |" in l]
+            if lines:
+                path = self.ctx.out.write(self.category, "takeover.txt", lines, dedupe=True)
+                res.files.append(str(path))
+                res.count = len(tak_over)
 
         if tak_over:
             self.console.print(
