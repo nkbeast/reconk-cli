@@ -160,22 +160,26 @@ class Pipeline:
 
         start = time.monotonic()
         counts = Counter()  # phase name -> times run (for round labels)
-        for group in stages:
-            parallel = len(group) > 1
-            self.runner.parallel_mode = parallel
-            if parallel:
-                with ThreadPoolExecutor(max_workers=len(group), thread_name_prefix="reconk") as pool:
-                    futs = {pool.submit(self._run_phase, name, counts[name] + 1, group): name for name in group}
-                    for fut in futs:
-                        result = fut.result()
-                        counts[result.name] += 1
-                        self.results.append(result)
-            else:
-                name = group[0]
-                result = self._run_phase(name, counts[name] + 1, group)
-                counts[result.name] += 1
-                self.results.append(result)
-        self.runner.parallel_mode = False
+        try:
+            for group in stages:
+                parallel = len(group) > 1
+                self.runner.parallel_mode = parallel
+                if parallel:
+                    with ThreadPoolExecutor(max_workers=len(group), thread_name_prefix="reconk") as pool:
+                        futs = {pool.submit(self._run_phase, name, counts[name] + 1, group): name for name in group}
+                        for fut in futs:
+                            result = fut.result()
+                            counts[result.name] += 1
+                            self.results.append(result)
+                else:
+                    name = group[0]
+                    result = self._run_phase(name, counts[name] + 1, group)
+                    counts[result.name] += 1
+                    self.results.append(result)
+        finally:
+            # always tear the parallel view down — a quit/interrupt must not
+            # leave the terminal in raw mode or an orphaned Live
+            self.runner.parallel_mode = False
         elapsed = time.monotonic() - start
 
         self._summary(elapsed)

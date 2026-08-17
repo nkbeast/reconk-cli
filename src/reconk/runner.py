@@ -6,10 +6,12 @@ Every command runs inside a rich Live panel that shows:
   * final status on completion
 
 While a *parallel* stage runs, all tools stream at once in a split-screen
-view — every command gets its own panel ("agent"). Press 1-9 (or Tab) to
-focus a panel: the focused tool is enlarged and shows more of its stream,
-the others stay compact and keep updating. `q`/`Esc` quits the view for
-the current stage and falls back to plain status lines.
+view — every command gets its own panel ("agent"). Press 1-9 to focus a
+panel directly, Tab / ↓ / → / n to cycle focus forward, ↑ / ← to cycle
+back, Home/End to jump to the first/last panel: the focused tool is
+enlarged and shows more of its stream, the others stay compact and keep
+updating. `q`/`Esc` quits the view for the current stage and falls back
+to plain status lines.
 
 All output is also captured to per-phase log files when a ``log_dir`` is
 configured (default: off — see ``output.save_tool_logs``). The same class
@@ -72,29 +74,43 @@ class _Stream:
         self.started = time.monotonic()
 
 
+_CSI_ARROWS = {
+    "A": "up", "B": "down", "C": "right", "D": "left",
+    "H": "home", "F": "end",
+}
+_CSI_OTHER = {"1~": "home", "4~": "end"}
+
+
 class _KeyReader(threading.Thread):
-    """Reads single keys (raw mode) from stdin into a queue."""
+    """Reads keys (raw mode) from stdin into a queue as semantic tokens.
+
+    Printable characters are queued as-is; control sequences are parsed
+    into names ("escape", "up", "down", "left", "right", "home", "end",
+    "tab"). Escape sequences are consumed whole, so an arrow key never
+    produces a stray "escape" token (which would quit the view).
+    """
 
     def __init__(self, keys: "queue.Queue[str]", stop: threading.Event):
         super().__init__(daemon=True)
         self.keys = keys
         self.stop = stop
 
+    @staticmethod
+    def _read(fd: int, timeout: float) -> Optional[bytes]:
+        import select
+
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            return None
+        try:
+            return os.read(fd, 1)
+        except OSError:
+            return None
+
     def run(self) -> None:
         if sys.platform == "win32":
-            try:
-                import msvcrt
-            except Exception:  # noqa: BLE001
-                return
-            while not self.stop.is_set():
-                try:
-                    if msvcrt.kbhit():
-                        self.keys.put(msvcrt.getwch())
-                except Exception:  # noqa: BLE001
-                    pass
-                time.sleep(0.05)
+            self._run_windows()
             return
-        import select
         import termios
         import tty
 
@@ -106,19 +122,58 @@ class _KeyReader(threading.Thread):
         try:
             tty.setcbreak(fd)
             while not self.stop.is_set():
-                r, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if r:
-                    try:
-                        ch = os.read(fd, 1).decode("utf-8", errors="replace")
-                    except Exception:  # noqa: BLE001
-                        break
-                    if ch:
-                        self.keys.put(ch)
+                b = self._read(fd, 0.1)
+                if not b:
+                    continue
+                self.keys.put(self._tokenize(b, fd))
         except Exception:  # noqa: BLE001
             pass
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _tokenize(self, b: bytes, fd: int) -> str:
+        if b != b"\x1b":
+            return b.decode("utf-8", errors="replace")
+        nxt = self._read(fd, 0.05)
+        if nxt is None or nxt == b"\x1b":
+            return "escape"  # lone ESC (or double-ESC)
+        if nxt == b"[":
+            first = self._read(fd, 0.05)
+            if first is None:
+                return "escape"
+            ch = first.decode("utf-8", errors="replace")
+            if ch in _CSI_ARROWS:
+                return _CSI_ARROWS[ch]
+            rest = self._read(fd, 0.05)
+            seq = ch + (rest or b"").decode("utf-8", errors="replace")
+            return _CSI_OTHER.get(seq, "ignore")
+        if nxt == b"O":  # SS3 — F-keys and similar
+            self._read(fd, 0.05)
+            return "ignore"
+        return "escape"  # Alt+key etc.
+
+    def _run_windows(self) -> None:
+        try:
+            import msvcrt
+        except Exception:  # noqa: BLE001
+            return
+        arrows = {"H": "up", "P": "down", "K": "left", "M": "right"}
+        while not self.stop.is_set():
+            try:
+                if not msvcrt.kbhit():
+                    time.sleep(0.05)
+                    continue
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    ch2 = msvcrt.getwch() if msvcrt.kbhit() else ""
+                    self.keys.put(arrows.get(ch2, "ignore"))
+                elif ch == "\x1b":
+                    self.keys.put("escape")
+                else:
+                    self.keys.put(ch)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -134,8 +189,10 @@ class ParallelView:
     rest stay compact and keep streaming.
 
     Keys while the view is up:
-      1-9      focus a tool panel
-      Tab / n  cycle focus to the next tool
+      1-9          focus a tool panel
+      Tab / ↓ / →  cycle focus to the next tool
+      ↑ / ←        cycle focus to the previous tool
+      Home / End   jump to the first / last tool
       q / Esc / Ctrl-C  quit the view for this stage (plain lines take over)
     """
 
@@ -173,6 +230,9 @@ class ParallelView:
             self._focus = 0
             self._streams.clear()
             self._order.clear()
+            # fresh queue — never replay leftover key bytes from a stage
+            # that was quit with q/Esc mid-sequence
+            self._keys = queue.Queue()
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
@@ -192,7 +252,7 @@ class ParallelView:
             self._thread = None
         self._live = None
         if self._key_thread:
-            self._key_thread.join(timeout=1)
+            self._key_thread.join(timeout=2)
             self._key_thread = None
 
     # ------------------------------------------------------------------ #
@@ -230,11 +290,15 @@ class ParallelView:
     # render loop (owns the Live)
     # ------------------------------------------------------------------ #
     def _loop(self) -> None:
+        # screen=True: the view renders on the terminal's alternate screen
+        # buffer, so it always fills the whole terminal from the top — an
+        # inline Live would start below previously printed output and its
+        # top would scroll off-screen as the panel grows
         live = Live(
             self._render(),
             console=self.console,
             refresh_per_second=int(1 / self.refresh),
-            transient=False,
+            transient=True,
             vertical_overflow="ellipsis",
         )
         live.start()
@@ -265,24 +329,45 @@ class ParallelView:
                 pass
 
     def _process_keys(self) -> None:
+        quit_view = False
         while True:
             try:
                 ch = self._keys.get_nowait()
             except queue.Empty:
-                return
-            if ch in ("q", "Q", "\x1b", "\x03"):
-                self.active = False
-                self._stop.set()
-                continue
+                break
+            if ch in ("q", "Q", "escape", "\x03"):
+                quit_view = True
+                break
             if ch.isdigit():
                 idx = int(ch) - 1
                 if 0 <= idx < len(self._order):
                     self._focus = idx
                     self._dirty.set()
-            elif ch in ("\t", "n", "N"):
+            elif ch in ("tab", "n", "N", "down", "right"):
                 if self._order:
                     self._focus = (self._focus + 1) % len(self._order)
                     self._dirty.set()
+            elif ch in ("up", "left"):
+                if self._order:
+                    self._focus = (self._focus - 1) % len(self._order)
+                    self._dirty.set()
+            elif ch == "home":
+                if self._order:
+                    self._focus = 0
+                    self._dirty.set()
+            elif ch == "end":
+                if self._order:
+                    self._focus = len(self._order) - 1
+                    self._dirty.set()
+        if quit_view:
+            self.active = False
+            self._stop.set()
+            self._dirty.set()
+            # restore the terminal immediately (cbreak off) so plain status
+            # lines work normally for the rest of the stage
+            if self._key_thread is not None:
+                self._key_thread.join(timeout=1)
+                self._key_thread = None
 
     # ------------------------------------------------------------------ #
     def _render(self) -> Panel:
@@ -306,40 +391,61 @@ class ParallelView:
                 header.append(f" {chip} ", style="bold cyan")
             else:
                 header.append(f" {chip} ", style="dim")
-        header.append("   [q] quit view  [tab] next  [1-9] focus", style="bold white")
-
-        body = Layout()
-        cells = [Layout(header, size=1)]
-        for i, s in enumerate(streams):
-            cells.append(
-                Layout(
-                    self._stream_panel(s, focused=(i == focus)),
-                    ratio=(
-                        self.FOCUSED_RATIO if i == focus else 1
-                    ),
-                )
-            )
-        body.split_column(*cells)
-
-        return Panel(
-            body,
-            border_style="cyan",
-            title="[bold cyan]Reconk — parallel tools[/bold cyan]",
-            subtitle="[dim]press 1-9 to watch a tool's stream[/dim]",
+        header.append(
+            "   [q] quit view  [tab/↓/→] next  [↑/←] prev  [home/end] first/last  [1-9] focus",
+            style="bold white",
         )
 
-    def _stream_panel(self, s: _Stream, focused: bool) -> Panel:
+        # Keep the whole renderable inside the terminal height. Rich's inline
+        # Live cannot scroll back: whenever the panel grows taller than the
+        # terminal, its top scrolls off-screen for good ("started slightly
+        # down, the top is not shown"). Panels are measured after every
+        # change and their tails shrunk until the total fits.
+        total_h = self.console.height or 24
+        focus_tail = self.FOCUSED_LINES
+        compact_tail = self.COMPACT_LINES
+
+        def build() -> Panel:
+            body: list = [header]
+            for i, s in enumerate(streams):
+                body.append(
+                    self._stream_panel(
+                        s,
+                        focused=(i == focus),
+                        tail_lines=focus_tail if i == focus else compact_tail,
+                    )
+                )
+            return Panel(
+                Group(*body),
+                border_style="cyan",
+                title="[bold cyan]Reconk — parallel tools[/bold cyan]",
+                subtitle="[dim]press 1-9 to watch a tool's stream[/dim]",
+            )
+
+        panel = build()
+        for _ in range(6):
+            overshoot = len(self.console.render_lines(panel)) - total_h
+            if overshoot <= 0:
+                break
+            if focus_tail > 3:
+                focus_tail = max(3, focus_tail - overshoot)
+            elif compact_tail > 1:
+                compact_tail = max(1, compact_tail - overshoot)
+            else:
+                break
+            panel = build()
+        return panel
+
+    def _stream_panel(self, s: _Stream, focused: bool, tail_lines: int) -> Panel:
         if s.done:
             style = "bold green" if s.ok else "bold red"
             head = Text(f"{'✔' if s.ok else '✗'} {s.title}  ({s.elapsed:.1f}s)", style=style)
         else:
             head = Spinner("dots", text=f" {s.title}  {time.monotonic() - s.started:5.1f}s", style="cyan")
-        lines = list(s.tail)
         body: list = [head, Text("")]
-        if focused:
-            body += [Text(l, style="bright_black") for l in lines[-self.FOCUSED_LINES:]]
-        else:
-            body += [Text(l, style="grey37") for l in lines[-self.COMPACT_LINES:]]
+        style = "bright_black" if focused else "grey37"
+        for l in list(s.tail)[-tail_lines:]:
+            body.append(Text(l, style=style))
         return Panel(
             Group(*body),
             title=f"[{'bold cyan' if focused else 'dim'}]{s.label}[/{'bold cyan' if focused else 'dim'}]",
@@ -478,33 +584,81 @@ class CommandRunner:
             else:
                 style = "bold green" if status.startswith("✔") else "bold red"
                 head = Text(f"{status}  ({elapsed:.1f}s)", style=style)
-            body: list = [head]
-            for line in tail:
-                body.append(Text(line, style="dim"))
-            return Panel(
-                Group(*body),
-                title=f"[bold cyan]{title}[/bold cyan]",
-                border_style="cyan",
-                padding=(0, 1),
-                subtitle=f"[dim]{label}[/dim]",
-            )
+            max_tail = max(1, (self.console.height or 24) - 6)
+            tail_lines = list(tail)[-max_tail:]
+            limit = self.console.height or 24
+
+            def build(lines: list) -> Panel:
+                return Panel(
+                    Group(head, *[Text(l, style="dim") for l in lines]),
+                    title=f"[bold cyan]{title}[/bold cyan]",
+                    border_style="cyan",
+                    padding=(0, 1),
+                    subtitle=f"[dim]{label}[/dim]",
+                )
+
+            # cap the panel to the terminal height — a taller panel pushes
+            # its own top off-screen (inline Live has no scrollback); drop
+            # exactly the overflow (long wrapped lines are measured, too)
+            panel = build(tail_lines)
+            for _ in range(8):
+                overshoot = len(self.console.render_lines(panel)) - limit
+                if overshoot <= 0 or not tail_lines:
+                    break
+                tail_lines = tail_lines[max(1, overshoot):]
+                panel = build(tail_lines)
+            return panel
 
         if quiet or self._parallel_mode or view_on:
             live = None
         else:
+            # screen=True: full-screen panel on the alternate buffer — it
+            # always fills the terminal from the top (an inline panel would
+            # start below earlier output and scroll its top off-screen)
             live = Live(
                 render("running..."),
                 console=self.console,
                 refresh_per_second=8,
-                transient=False,
+                transient=True,
+                screen=True,
                 vertical_overflow="ellipsis",
             )
             live.start()
+
+        # single-panel mode: capture stdin in raw mode so typed keys don't
+        # echo into the live region; q/Esc closes the panel early (the
+        # command keeps running, plain lines take over)
+        keys_q: "queue.Queue[str]" = queue.Queue()
+        key_stop = threading.Event()
+        key_thread: Optional[_KeyReader] = None
+        panel_closed = False
+        if live is not None:
+            key_thread = _KeyReader(keys_q, key_stop)
+            key_thread.start()
 
         try:
             while True:
                 if kill_flag.is_set():
                     break
+                if key_thread is not None:
+                    while True:
+                        try:
+                            k = keys_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        if k in ("q", "Q", "escape", "\x03"):
+                            panel_closed = True
+                            break
+                    if panel_closed:
+                        live.stop()  # type: ignore[union-attr]
+                        live = None
+                        key_stop.set()
+                        key_thread.join(timeout=1)
+                        key_thread = None
+                        if not quiet:
+                            self.console.print(
+                                "  [dim]panel closed — output continues below[/dim]"
+                            )
                 if timeout and time.monotonic() - started > timeout:
                     proc.kill()
                     try:
@@ -543,6 +697,14 @@ class CommandRunner:
                 raise CommandError(f"{display} (interrupted)", 130, log)
             return subprocess.CompletedProcess(cmd, 130, "", "")
         finally:
+            if key_thread is not None:
+                key_stop.set()
+                key_thread.join(timeout=1)
+            if live is not None:
+                try:
+                    live.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             if log_fh:
                 try:
                     log_fh.close()
@@ -573,25 +735,26 @@ class CommandRunner:
         elapsed = time.monotonic() - started
         rc = proc.returncode
 
+        status_printed = False
         if view_on:
             self.parallel_view.finish(view_sid, rc, elapsed)
-        if live:
+        elif not quiet and (live is not None or panel_closed):
+            # full-screen panel was used — report the result as a plain line
+            # (the alternate screen is already restored by the finally)
             if rc == 0:
-                live.update(render(f"✔ completed in {elapsed:.1f}s", animated=False))
+                self.console.print(f"  [green]✔ {label}[/green] completed in {elapsed:.1f}s")
             else:
-                live.update(render(f"✗ exited with code {rc}", animated=False))
-            try:
-                live.stop()
-            except Exception:  # noqa: BLE001
-                pass
+                self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
+            status_printed = True
         elif not quiet and self._parallel_mode and not view_on:
             if rc == 0:
                 self.console.print(f"  [green]✔ {label}[/green] completed in {elapsed:.1f}s")
             else:
                 self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
+            status_printed = True
 
         if check and rc != 0:
-            if not quiet and not view_on:
+            if not quiet and not view_on and not status_printed:
                 self.console.print(f"  [red]✗ {label}[/red] exited with code {rc}")
             raise CommandError(display, rc, log)
 
