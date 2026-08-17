@@ -167,19 +167,27 @@ class JsAnalysisModule(Module):
         hosts_file.write_text("\n".join(sorted(alive)) + "\n", encoding="utf-8")
         out_file = self.ctx.out.cat(self.category) / "katana_js_raw.txt"
 
+        # Explicit crawl scope so katana never wanders onto third-party hosts
+        # (older katana builds had no default scope and followed every
+        # outlink — socials, CDNs, corporate sites — into the raw file).
+        args: List[str] = [
+            "katana",
+            "-list", str(hosts_file),
+            "-jc",                     # javascript crawling
+            "-d", str(depth),
+            "-silent",
+            "-timeout", "10",
+            "-retry", "1",
+            "-rate-limit", "100",
+            "-o", str(out_file),
+        ]
+        scope_re = self._scope_regex()
+        if scope_re:
+            args += ["-cs", scope_re]
+
         try:
             self.runner.run(
-                [
-                    "katana",
-                    "-list", str(hosts_file),
-                    "-jc",                     # javascript crawling
-                    "-d", str(depth),
-                    "-silent",
-                    "-timeout", "10",
-                    "-retry", "1",
-                    "-rate-limit", "100",
-                    "-o", str(out_file),
-                ],
+                args,
                 name="katana_js",
                 timeout=3600,
             )
@@ -195,6 +203,25 @@ class JsAnalysisModule(Module):
             if urlparse(line).path.lower().endswith(".js"):
                 urls.append(line)
         return urls
+
+    # ------------------------------------------------------------------ #
+    # scope helpers
+    # ------------------------------------------------------------------ #
+    def _scope_regex(self) -> str:
+        """Regex for katana -cs: match URLs under scope domains (+wildcards).
+
+        ``example.com`` (exact) and ``*.example.com`` (wildcard) are both
+        covered by the optional subdomain prefix, so one alternation entry
+        per base domain is enough.
+        """
+        scope = self.ctx.scope
+        bases = set(scope.domains) | set(scope.wildcards)
+        if not bases:
+            return ""
+        pattern = r"https?://(?:[a-z0-9.-]+\.)?(?:"
+        pattern += "|".join(re.escape(b) for b in sorted(bases))
+        pattern += r")(?::\d+)?(?:/|$)"
+        return pattern
 
     # ------------------------------------------------------------------ #
     # 2. collect js urls
